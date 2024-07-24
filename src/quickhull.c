@@ -2,7 +2,7 @@
 
 static inline void getExtremeCoordsPts(Data *d, int ptIndices[4]);
 static inline int setExtremeCoordsAsInit(Data *d, int ptIndices[4]);
-static void removeConveredPoints(Data *d, int nUncovered);
+static void removeConveredPoints(Data *d, int hullSize, int *nUncovered);
 
 void quickhull(Data *d)
 {
@@ -65,16 +65,25 @@ static inline int setExtremeCoordsAsInit(Data *d, int ptIndices[4])
     return hullSize;
 }
 
-static void removeConveredPoints(Data *d, int hullSize, int nUncovered)
+static void removeConveredPoints(Data *d, int hullSize, int *nUncovered)
 {
     int i = hullSize;
-    int j = nUncovered + hullSize;
+    int j = d->n - *nUncovered + hullSize - 1;
     while (i < j)
     {
+        bool iIsCovered = false;
+        for (int k1 = 0, k2 = hullSize; k1 < hullSize; k2 = k1++)
+            if (d->Y[k1] < d->Y[i] != (d->Y[k2] > d->Y[i]) && (d->X[i] < (d->X[k2]-d->X[k1]) * (d->Y[i]-d->Y[k1]) / (d->Y[k2]-d->Y[k1]) + d->X[k1]))
+                iIsCovered = !iIsCovered;
         
-
-        i++;
+        if (iIsCovered)
+        {
+            swapElems(d->X[i], d->X[j]);
+            swapElems(d->Y[i], d->Y[j]);
+            *nUncovered += 1;
+            j--;
+        }
+        else
+            i++;
     }
-    
-    
 }
