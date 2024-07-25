@@ -312,7 +312,7 @@ void plotPartialData(Data *points, int hullSize, int nUncovered, const char * pl
         fprintf(gnuplotPipe, "%f %f\n", points->X[i], points->Y[i]);
     fprintf(gnuplotPipe, "e\n");
 
-    for (int i = 0; i < hullSize + nUncovered; i++)
+    for (int i = 0; i < hullSize + nUncovered+1; i++)
         fprintf(gnuplotPipe, "%f %f\n", points->X[i], points->Y[i]);
     fprintf(gnuplotPipe, "e\n");
 

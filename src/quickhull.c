@@ -13,7 +13,7 @@ static inline void getExtremeCoordsPts(Data *d, int ptIndices[4]);
 static inline int setExtremeCoordsAsInit(Data *d, int ptIndices[4]);
 static void removeConveredPoints(Data *d, int hullSize, int *nUncovered);
 static inline SuccessorData findFarthestPt(Data *d, int hullSize, int nUncovered);
-static inline void addPtToHull(Data *d, SuccessorData pt);
+static inline void addPtToHull(Data *d, SuccessorData pt, int hullSize);
 
 int quickhull(Data *d)
 {
@@ -28,11 +28,10 @@ int quickhull(Data *d)
     while (nUncovered > 0)
     {
         plotPartialData(d, hullSize, nUncovered, "1600,900");
-        int i;
-        scanf("%d",&i);
+        getchar();
 
         SuccessorData s = findFarthestPt(d, hullSize, nUncovered);
-        addPtToHull(d, s);
+        addPtToHull(d, s, hullSize);
         hullSize++;
 
         removeConveredPoints(d, hullSize, &nUncovered);
@@ -100,10 +99,10 @@ static void removeConveredPoints(Data *d, int hullSize, int *nUncovered)
     int j = *nUncovered + hullSize - 1; // position of last covered element in d->X and d->Y
     while (i < j)
     {
-        bool iIsCovered = false;
+        bool iIsCovered = true;
         for (int k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
         {
-            if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] > d->Y[i]))
+            if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] < d->Y[i]))
             {
                 float a = d->X[k1] - d->X[k2];
                 float b = d->Y[k2] - d->Y[k1];
@@ -164,10 +163,13 @@ static inline SuccessorData findFarthestPt(Data *d, int hullSize, int nUncovered
     return farthestPt;
 }
 
-static inline void addPtToHull(Data *d, SuccessorData pt)
+static inline void addPtToHull(Data *d, SuccessorData pt, int hullSize)
 {
-    float xBak = d->X[pt.node], yBak = d->Y[pt.node];
-    for (int i = pt.node-1; i > pt.anchor; i--)
+    swapElems(d->X[pt.node], d->X[hullSize]);
+    swapElems(d->Y[pt.node], d->Y[hullSize]);
+
+    float xBak = d->X[hullSize], yBak = d->Y[hullSize];
+    for (int i = hullSize-1; i > pt.anchor; i--)
     {
         d->X[i+1] = d->X[i];
         d->Y[i+1] = d->Y[i];
