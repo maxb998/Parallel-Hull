@@ -12,7 +12,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/bin/debug/main",
             "args": [
-                "--file", "data/round_10000_1.csv",
+                "--file", "data/round_100_1.csv",
                 "--threads", "1",
             ],
             "cwd": "${workspaceFolder}"

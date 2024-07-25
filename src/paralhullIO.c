@@ -104,6 +104,8 @@ Params argParse(int argc, char *argv[])
 
     Params p = emptyParams();
     argp_parse(&argpData, argc, argv, 0, 0, &p);
+
+    return p;
 }
 
 error_t argpParser(int key, char *arg, struct argp_state *state)
@@ -190,6 +192,23 @@ Data emptyData()
     return d;
 }
 
+Data cloneData(Data *d)
+{
+    Data r = *d;
+    r.X = malloc(r.n * 2 * sizeof(float));
+    if (r.X == NULL)
+        throwError("cloneData: Failed to allocate memory for points");
+    r.Y = &r.X[r.n+1];
+
+    for (int i = 0; i < d->n; i++)
+    {
+        r.X[i] = d->X[i];
+        r.Y[i] = d->Y[i];
+    }
+    
+    return r;
+}
+
 void readFile(Data *d, Params *p)
 {
     char *r = p->inputFile;
@@ -230,4 +249,82 @@ void readFile(Data *d, Params *p)
     }
 
     fclose(file);
+}
+
+void plotData(Data *points, int hullSize, const char * plotPixelSize, const char * pointColor, const char * tourPointColor, const int pointSize)
+{
+
+    // creating the pipeline for gnuplot
+    FILE *gnuplotPipe = popen("gnuplot -persistent 2>/dev/null", "w");
+
+    // gnuplot settings
+    fprintf(gnuplotPipe, "set title \"Convex Hull\"\n");
+    fprintf(gnuplotPipe, "set terminal qt size %s\n", plotPixelSize);
+
+    // set plot linestyles
+    fprintf(gnuplotPipe, "set style line 1 linecolor rgb '%s' pt 7 pointsize %d\n", pointColor, pointSize);
+    fprintf(gnuplotPipe, "set style line 2 linecolor rgb '%s' pointsize 0\n", tourPointColor);//, pointSize);
+
+    // populating the plot
+    
+    fprintf(gnuplotPipe, "plot '-' with point linestyle 1, '-' with linespoint linestyle 2\n");
+
+    // first plot only the points
+    for (int i = 0; i < points->n; i++)
+        fprintf(gnuplotPipe, "%f %f\n", points->X[i], points->Y[i]);
+    fprintf(gnuplotPipe, "e\n");
+
+    // second print the tour
+    for (int i = 0; i < hullSize; i++)
+        fprintf(gnuplotPipe, "%f %f\n", points->X[i], points->Y[i]);
+    fprintf(gnuplotPipe, "%f %f\n", points->X[0], points->Y[0]);
+    
+    fprintf(gnuplotPipe, "e\n");
+
+    // force write on stream
+    fflush(gnuplotPipe);
+
+    // close stream
+    pclose(gnuplotPipe);
+}
+
+void plotPartialData(Data *points, int hullSize, int nUncovered, const char * plotPixelSize)
+{
+
+    // creating the pipeline for gnuplot
+    FILE *gnuplotPipe = popen("gnuplot -persistent 2>/dev/null ", "w");
+
+    // gnuplot settings
+    fprintf(gnuplotPipe, "set title \"Convex Hull\"\n");
+    fprintf(gnuplotPipe, "set terminal qt size %s\n", plotPixelSize);
+
+    // set plot linestyles
+    fprintf(gnuplotPipe, "set style line 1 linecolor rgb '%s' pt 7 pointsize %d\n", "red", 2);
+    fprintf(gnuplotPipe, "set style line 2 linecolor rgb '%s' pt 7 pointsize %d\n", "green", 2);
+    fprintf(gnuplotPipe, "set style line 3 linecolor rgb '%s' pointsize 0\n", "black");
+
+    // populating the plot
+    
+    fprintf(gnuplotPipe, "plot '-' with point linestyle 1, '-' with point linestyle 2, '-' with linespoint linestyle 3\n");
+
+    // first plot only the points
+    for (int i = 0; i < points->n; i++)
+        fprintf(gnuplotPipe, "%f %f\n", points->X[i], points->Y[i]);
+    fprintf(gnuplotPipe, "e\n");
+
+    for (int i = 0; i < hullSize + nUncovered; i++)
+        fprintf(gnuplotPipe, "%f %f\n", points->X[i], points->Y[i]);
+    fprintf(gnuplotPipe, "e\n");
+
+    // second print the tour
+    for (int i = 0; i < hullSize; i++)
+        fprintf(gnuplotPipe, "%f %f\n", points->X[i], points->Y[i]);
+    fprintf(gnuplotPipe, "%f %f\n", points->X[0], points->Y[0]);
+    fprintf(gnuplotPipe, "e\n");
+
+    // force write on stream
+    fflush(gnuplotPipe);
+
+    // close stream
+    pclose(gnuplotPipe);
 }

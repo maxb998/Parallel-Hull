@@ -42,5 +42,11 @@ void throwError (char * line, ...);
 Params argParse(int argc, char *argv[]);
 
 Data emptyData();
+Data cloneData(Data *d);
 
-void readFile(Data *d);
+void readFile(Data *d, Params *p);
+
+int quickhull(Data *d);
+
+void plotData(Data *points, int hullSize, const char * plotPixelSize, const char * pointColor, const char * tourPointColor, const int pointSize);
+void plotPartialData(Data *points, int hullSize, int nUncovered, const char * plotPixelSize);
