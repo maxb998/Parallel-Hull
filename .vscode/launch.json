@@ -12,8 +12,9 @@
             "request": "launch",
             "program": "${workspaceFolder}/bin/debug/main",
             "args": [
-                "--file", "data/round_100_1.csv",
+                "--file", "data/round_10",
                 "--threads", "1",
+                "--loglvl", "debug"
             ],
             "cwd": "${workspaceFolder}"
        },
@@ -24,8 +25,9 @@
             "request": "launch",
             "program": "${workspaceFolder}/bin/exec/main",
             "args": [
-                "--file", "data/",
+                "--file", "data/round_10e3",
                 "--threads", "1",
+                "--loglvl", "info"
             ],
             "cwd": "${workspaceFolder}"
         },
@@ -39,6 +41,7 @@
                 "mpirun", "-np", "4", "bin/exec/main",
                 "--file", "data/",
                 "--threads", "1",
+                "--loglvl", "notice"
             ],
             "cwd": "${workspaceFolder}"
         },

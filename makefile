@@ -17,7 +17,7 @@ BIN_DIR = bin/exec/
 CFLAGS = -O3 -ftree-loop-im -ffast-math -mavx2 -march=native -mtune=native -Isrc/headers
 endif
 
-SOURCE_NAMES = main.c paralhullIO.c quickhull.c
+SOURCE_NAMES = main.c argParser.c paralhullIO.c quickhull.c
 
 HEADER_NAMES = paralhull.h
 

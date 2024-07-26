@@ -3,7 +3,15 @@
 
 #define AVX_VEC_SIZE 8
 
+// #define LOCAL_DEBUG
+#define GLOBAL_DEBUG
+#define GUI_OUTPUT
+
 #define swapElems(elem1,elem2) { register typeof(elem1) swapVarTemp = elem1; elem1 = elem2; elem2 = swapVarTemp; }
+
+
+// Convert timespec struct to a double time in seconds
+#define cvtTimespec2Double(t) (double)t.tv_sec + (double)t.tv_nsec / 1000000000.0
 
 enum LogLevel
 {
@@ -24,7 +32,6 @@ typedef struct
 
     char inputFile[1000];
     enum LogLevel logLevel;
-    bool gnuplot;
     
 } Params;
 
@@ -41,12 +48,8 @@ void throwError (char * line, ...);
 
 Params argParse(int argc, char *argv[]);
 
-Data emptyData();
-Data cloneData(Data *d);
-
 void readFile(Data *d, Params *p);
 
-int quickhull(Data *d);
+void plotData(Data *points, int hullSize, int nUncovered, const char * plotPixelSize, const char * title);
 
-void plotData(Data *points, int hullSize, const char * plotPixelSize, const char * pointColor, const char * tourPointColor, const int pointSize);
-void plotPartialData(Data *points, int hullSize, int nUncovered, const char * plotPixelSize);
+int quickhull(Data *d);
