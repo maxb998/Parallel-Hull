@@ -4,4 +4,5 @@ obj/debug/*.o
 obj/exec/*.o
 data/*
 !data/.placeholder
+.vscode/settings.json
 

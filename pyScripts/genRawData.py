@@ -2,7 +2,7 @@ import numpy as np
 
 max_raidius = 10**6
               
-num_points = 10**3
+num_points = 5*10**8
 
 theta = np.random.default_rng().random(size=num_points, dtype=np.float32)
 np.multiply(theta, 2*np.pi, out=theta)

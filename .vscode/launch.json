@@ -12,7 +12,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/bin/debug/main",
             "args": [
-                "--file", "data/round_10",
+                "--file", "data/round_10e3",
                 "--threads", "1",
                 "--loglvl", "debug"
             ],
@@ -25,9 +25,9 @@
             "request": "launch",
             "program": "${workspaceFolder}/bin/exec/main",
             "args": [
-                "--file", "data/round_10e3",
+                "--file", "data/round_5x10e8",
                 "--threads", "1",
-                "--loglvl", "info"
+                "--loglvl", "trace"
             ],
             "cwd": "${workspaceFolder}"
         },
@@ -41,7 +41,7 @@
                 "mpirun", "-np", "4", "bin/exec/main",
                 "--file", "data/",
                 "--threads", "1",
-                "--loglvl", "notice"
+                "--loglvl", "info"
             ],
             "cwd": "${workspaceFolder}"
         },

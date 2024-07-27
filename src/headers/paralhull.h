@@ -4,7 +4,7 @@
 #define AVX_VEC_SIZE 8
 
 // #define LOCAL_DEBUG
-#define GLOBAL_DEBUG
+// #define DEBUG
 #define GUI_OUTPUT
 
 #define swapElems(elem1,elem2) { register typeof(elem1) swapVarTemp = elem1; elem1 = elem2; elem2 = swapVarTemp; }
