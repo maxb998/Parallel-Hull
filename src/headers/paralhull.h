@@ -4,8 +4,11 @@
 #define AVX_VEC_SIZE 8
 
 // #define LOCAL_DEBUG
-// #define DEBUG
+#define DEBUG
 #define GUI_OUTPUT
+#define LOCAL_MODE
+
+#define GNUPLOT_RES "1600,900"
 
 #define swapElems(elem1,elem2) { register typeof(elem1) swapVarTemp = elem1; elem1 = elem2; elem2 = swapVarTemp; }
 
@@ -44,6 +47,7 @@ typedef struct
 
 void setLogLevel(enum LogLevel lvl);
 void LOG (enum LogLevel lvl, char * line, ...);
+void inlineLOG (enum LogLevel lvl, char * line, ...);
 void throwError (char * line, ...);
 
 Params argParse(int argc, char *argv[]);
@@ -52,4 +56,6 @@ void readFile(Data *d, Params *p);
 
 void plotData(Data *points, int hullSize, int nUncovered, const char * plotPixelSize, const char * title);
 
-int quickhull(Data *d);
+size_t quickhull(Data *d);
+
+size_t parallhullThreaded(Data *d, int nThreads);

@@ -1,12 +1,13 @@
 #include "paralhull.h"
 
-#include <math.h>
-#include <stdio.h>
-#include <string.h>
-#include <time.h>
-#include <unistd.h> // needed to get the _POSIX_MONOTONIC_CLOCK and measure time
+#define SMARTMODE
+// #define USE_COMPLEX_COVERED_NODE_REMOVAL // not necessarely faster
 
-//#define SMARTMODE
+#include <math.h>
+#ifdef LOCAL_MODE
+    #include <time.h>
+    #include <unistd.h> // needed to get the _POSIX_MONOTONIC_CLOCK and measure time
+#endif
 
 typedef struct 
 {
@@ -16,12 +17,19 @@ typedef struct
 
 static void getExtremeCoordsPts(Data *d, size_t ptIndices[4]);
 static size_t setExtremeCoordsAsInit(Data *d, size_t ptIndices[4]);
-static size_t removeConveredPointsNaive(Data *d, size_t hullSize, size_t nUncovered);
+static size_t removeCoveredPointsSimple(Data *d, size_t hullSize, size_t nUncovered);
 #ifndef SMARTMODE
-    static SuccessorData findFarthestPtNaive(Data *d, size_t hullSize, size_t nUncovered);
-    static void addPtToHullNaive(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered);
+    #ifdef USE_COMPLEX_COVERED_NODE_REMOVAL
+        static size_t removeNewlyCoveredPointsSimple(Data *d, size_t hullSize, size_t nUncovered, SuccessorData s);
+    #endif
+    static SuccessorData findFarthestPtSimple(Data *d, size_t hullSize, size_t nUncovered);
+    static void addPtToHullSimple(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered);
 #else
-    static size_t removeConveredPointsSmart(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
+    #ifndef USE_COMPLEX_COVERED_NODE_REMOVAL
+        static size_t removeCoveredPointsSmart(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
+    #else
+        static size_t removeNewlyCoveredPointsSmart(Data *d, size_t hullSize, size_t nUncovered, SuccessorData s, float *minDists, size_t *minDistAnchors);
+    #endif
     static void setupMaxDistArrays(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
     static SuccessorData findFarthestPtSmart(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
     static void addPtToHullSmart(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
@@ -31,11 +39,15 @@ static size_t removeConveredPointsNaive(Data *d, size_t hullSize, size_t nUncove
     #endif
 #endif
 
-int quickhull(Data *d)
+size_t quickhull(Data *d)
 {
-    struct timespec timeStruct;
-    clock_gettime(_POSIX_MONOTONIC_CLOCK, &timeStruct);
-    double startTime = cvtTimespec2Double(timeStruct);
+    #ifdef LOCAL_MODE
+        struct timespec timeStruct;
+        clock_gettime(_POSIX_MONOTONIC_CLOCK, &timeStruct);
+        double startTime = cvtTimespec2Double(timeStruct);
+        double iterTime = startTime, previousIterTime;
+        int iterCount = 0, shiftAmount = -1;
+    #endif
 
     // init
     size_t ptIndices[4];
@@ -43,7 +55,7 @@ int quickhull(Data *d)
     size_t hullSize = setExtremeCoordsAsInit(d, ptIndices);
     
     size_t nUncovered = d->n - hullSize;
-    nUncovered = removeConveredPointsNaive(d, hullSize, nUncovered);
+    nUncovered = removeCoveredPointsSimple(d, hullSize, nUncovered);
 
     #ifdef SMARTMODE
         float *minDists = malloc(nUncovered * (sizeof(float) + sizeof(size_t)));
@@ -53,23 +65,39 @@ int quickhull(Data *d)
         setupMaxDistArrays(d, hullSize, nUncovered, minDists, minDistAnchors);
     #endif
 
-    int iterCount = 0;
-    double iterTime=startTime, previousIterTime;
     while (nUncovered > 0)
     {
+        #ifdef LOCAL_MODE
+            iterCount++;    
+            previousIterTime = iterTime;
+            clock_gettime(_POSIX_MONOTONIC_CLOCK, &timeStruct);
+            iterTime = cvtTimespec2Double(timeStruct);
+            inlineLOG(LOG_LVL_TRACE, "iteration %5d took %.3es. nUncovered=%.3e, hullSize=%ld", iterCount, iterTime-previousIterTime, (float)nUncovered, hullSize);
+            if ((iterCount >> shiftAmount) || (iterCount < 3))
+            {
+                LOG(LOG_LVL_INFO, "iteration %5d completed after %.3es from begining. nUncovered=%.3e, hullSize=%ld", iterCount, iterTime-startTime, (float)nUncovered, hullSize);
+                shiftAmount++;
+            }
+        #endif
+
         #ifdef LOCAL_DEBUG
             // show partial hull with gnuplot at each iteration and wait for user input to resume
             char plotTitle[200];
             sprintf(plotTitle, "Partial Hull: size=%lu, uncovered=%lu", hullSize, nUncovered);
-            plotData(d, hullSize, nUncovered, "1920,1080", plotTitle);
+            plotData(d, hullSize, nUncovered, GNUPLOT_RES, plotTitle);
             getchar();
         #endif
 
         #ifndef SMARTMODE
-            SuccessorData s = findFarthestPtNaive(d, hullSize, nUncovered);
-            addPtToHullNaive(d, s, hullSize, nUncovered);
+            SuccessorData s = findFarthestPtSimple(d, hullSize, nUncovered);
+            addPtToHullSimple(d, s, hullSize, nUncovered);
             hullSize++;
-            nUncovered = removeConveredPointsNaive(d, hullSize, nUncovered);
+            nUncovered--;
+            #ifndef USE_COMPLEX_COVERED_NODE_REMOVAL
+                nUncovered = removeCoveredPointsSimple(d, hullSize, nUncovered);
+            #else
+                nUncovered = removeNewlyCoveredPointsSimple(d, hullSize, nUncovered, s);
+            #endif
         #else
             SuccessorData s = findFarthestPtSmart(d, hullSize, nUncovered, minDists, minDistAnchors);
             addPtToHullSmart(d, s, hullSize, nUncovered, minDists, minDistAnchors);
@@ -77,23 +105,31 @@ int quickhull(Data *d)
             #ifdef DEBUG
                 size_t oldNUncovered = nUncovered;
             #endif
+
             nUncovered--;
-            nUncovered = removeConveredPointsSmart(d, hullSize, nUncovered, minDists, minDistAnchors);
+            #ifndef USE_COMPLEX_COVERED_NODE_REMOVAL
+                nUncovered = removeCoveredPointsSmart(d, hullSize, nUncovered, minDists, minDistAnchors);
+            #else
+                nUncovered = removeNewlyCoveredPointsSmart(d, hullSize, nUncovered, s, minDists, minDistAnchors);
+            #endif
             adaptMinArrays(d, s, hullSize, nUncovered, minDists, minDistAnchors);
             #ifdef DEBUG
                 if (integrityCheck(d, hullSize, nUncovered, minDists, minDistAnchors))
                     throwError("Error detected in values inside minDist* arrays. n=%ld, hullSize=%ld, nUncovered=%ld, oldNUncovered=%ld, s.node=%ld, s.anchor=%ld", d->n, hullSize, nUncovered, oldNUncovered, s.node, s.anchor);
             #endif
         #endif
-
-        previousIterTime = iterTime;
-        clock_gettime(_POSIX_MONOTONIC_CLOCK, &timeStruct);
-        iterTime = cvtTimespec2Double(timeStruct);
-        LOG(LOG_LVL_INFO, "iteration %d took %lfs", iterCount, iterTime-previousIterTime);
-        LOG(LOG_LVL_TRACE, "nUncovered=%ld, hullSize=%ld", nUncovered, hullSize);
-
-        iterCount++;
     }
+
+    #ifdef DEBUG
+        nUncovered = d->n - hullSize;
+        nUncovered = removeCoveredPointsSimple(d, hullSize, nUncovered);
+        if (nUncovered != 0)
+            throwError("There are still some points that are not inside the hull");
+    #endif
+
+    #ifdef LOCAL_MODE
+        LOG(LOG_LVL_TRACE, "iteration %5d took %.3es. nUncovered=%.3e, hullSize=%ld", iterCount, iterTime-previousIterTime, (float)nUncovered, hullSize);
+    #endif
 
     #ifdef SMARTMODE
         free(minDists);
@@ -154,7 +190,7 @@ static size_t setExtremeCoordsAsInit(Data *d, size_t ptIndices[4])
     return hullSize;
 }
 
-static size_t removeConveredPointsNaive(Data *d, size_t hullSize, size_t nUncovered)
+static size_t removeCoveredPointsSimple(Data *d, size_t hullSize, size_t nUncovered)
 {
     size_t i = hullSize;
     size_t j = nUncovered + hullSize - 1; // position of last covered element in d->X and d->Y
@@ -187,7 +223,77 @@ static size_t removeConveredPointsNaive(Data *d, size_t hullSize, size_t nUncove
 }
 
 #ifndef SMARTMODE
-static SuccessorData findFarthestPtNaive(Data *d, size_t hullSize, size_t nUncovered)
+#ifdef USE_COMPLEX_COVERED_NODE_REMOVAL
+    static size_t removeNewlyCoveredPointsSimple(Data *d, size_t hullSize, size_t nUncovered, SuccessorData s)
+    {
+        size_t i = hullSize;
+        size_t j = nUncovered + hullSize - 1; // position of last covered element in d->X and d->Y
+
+        float minY = d->Y[s.anchor], maxY = d->Y[s.anchor+2];
+        if (s.anchor + 2 == hullSize)
+            maxY = d->Y[0];
+        if (minY > maxY)
+            swapElems(minY, maxY);
+        if (minY > d->Y[s.anchor+1])
+            minY = d->Y[s.anchor+1];
+        else if (maxY < d->Y[s.anchor+1])
+            maxY = d->Y[s.anchor+1];
+
+        while (i <= j)
+        {
+            while ((j > i) && ((d->Y[j] > maxY) || (d->Y[j] < minY)))
+            {
+                int iInterceptions = 0;
+                for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
+                {
+                    if ((d->Y[k1] < d->Y[j]) != (d->Y[k2] < d->Y[j]))
+                    {
+                        float a = d->X[k1] - d->X[k2];
+                        float b = d->Y[k2] - d->Y[k1];
+                        float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
+                        if (a * d->Y[j] + b * d->X[j] + c > 0)
+                            iInterceptions++;
+                    }
+                }
+
+                if (iInterceptions != 2)
+                    break;
+                j--;
+            }
+
+            if ((d->Y[i] <= maxY) && (d->Y[i] >= minY))
+            {
+                int iInterceptions = 0;
+                for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
+                {
+                    if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] < d->Y[i]))
+                    {
+                        float a = d->X[k1] - d->X[k2];
+                        float b = d->Y[k2] - d->Y[k1];
+                        float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
+                        if (a * d->Y[i] + b * d->X[i] + c > 0)
+                            iInterceptions++;
+                    }
+                }
+
+                if (iInterceptions == 2)
+                {
+                    swapElems(d->X[i], d->X[j]);
+                    swapElems(d->Y[i], d->Y[j]);
+                    j--;
+                }
+                else
+                    i++;
+            }
+            else
+                i++;
+        }
+
+        return i - hullSize;
+    }
+#endif
+
+static SuccessorData findFarthestPtSimple(Data *d, size_t hullSize, size_t nUncovered)
 {
     SuccessorData farPt = { .node=0, .anchor=-1 };
     float farPtDist = -1;
@@ -230,7 +336,7 @@ static SuccessorData findFarthestPtNaive(Data *d, size_t hullSize, size_t nUncov
     return farPt;
 }
 
-static void addPtToHullNaive(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered)
+static void addPtToHullSimple(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered)
 {
     swapElems(d->X[pt.node], d->X[hullSize]);
     swapElems(d->Y[pt.node], d->Y[hullSize]);
@@ -271,41 +377,113 @@ static SuccessorData findFarthestPtSmart(Data *d, size_t hullSize, size_t nUncov
     return farPt;
 }
 
-static size_t removeConveredPointsSmart(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors)
-{
-    size_t i = hullSize;// i2 = 0;
-    size_t j = nUncovered + hullSize - 1;// j2 = nUncovered; // position of last covered element in d->X and d->Y
-    while (i <= j)
+#ifndef USE_COMPLEX_COVERED_NODE_REMOVAL
+    static size_t removeCoveredPointsSmart(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors)
     {
-        bool iIsCovered = true;
-        for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
+        size_t i = hullSize;// i2 = 0;
+        size_t j = nUncovered + hullSize - 1;// j2 = nUncovered; // position of last covered element in d->X and d->Y
+        while (i <= j)
         {
-            if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] < d->Y[i]))
+            bool iIsCovered = true;
+            for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
             {
-                float a = d->X[k1] - d->X[k2];
-                float b = d->Y[k2] - d->Y[k1];
-                float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
-                if (a * d->Y[i] + b * d->X[i] + c > 0)
-                    iIsCovered = !iIsCovered;
+                if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] < d->Y[i]))
+                {
+                    float a = d->X[k1] - d->X[k2];
+                    float b = d->Y[k2] - d->Y[k1];
+                    float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
+                    if (a * d->Y[i] + b * d->X[i] + c > 0)
+                        iIsCovered = !iIsCovered;
+                }
+            }
+
+            if (iIsCovered)
+            {
+                swapElems(d->X[i], d->X[j]);
+                swapElems(d->Y[i], d->Y[j]);
+                minDists[i - hullSize] = minDists[j - hullSize];
+                minDistAnchors[i - hullSize] = minDistAnchors[j - hullSize];
+                j--; //j2--;
+            }
+            else
+            {
+                i++; //i2++;
             }
         }
 
-        if (iIsCovered)
-        {
-            swapElems(d->X[i], d->X[j]);
-            swapElems(d->Y[i], d->Y[j]);
-            minDists[i - hullSize] = minDists[j - hullSize];
-            minDistAnchors[i - hullSize] = minDistAnchors[j - hullSize];
-            j--; //j2--;
-        }
-        else
-        {
-            i++; //i2++;
-        }
+        return i - hullSize;
     }
+#else
+    static size_t removeNewlyCoveredPointsSmart(Data *d, size_t hullSize, size_t nUncovered, SuccessorData s, float *minDists, size_t *minDistAnchors)
+    {
+        size_t i = hullSize;
+        size_t j = nUncovered + hullSize - 1; // position of last covered element in d->X and d->Y
 
-    return i - hullSize;
-}
+        float minY = d->Y[s.anchor], maxY = d->Y[s.anchor+2];
+        if (s.anchor + 2 == hullSize)
+            maxY = d->Y[0];
+        if (minY > maxY)
+            swapElems(minY, maxY);
+        if (minY > d->Y[s.anchor+1])
+            minY = d->Y[s.anchor+1];
+        else if (maxY < d->Y[s.anchor+1])
+            maxY = d->Y[s.anchor+1];
+
+        while (i <= j)
+        {
+            while ((j > i) && ((d->Y[j] > maxY) || (d->Y[j] < minY)))
+            {
+                int iInterceptions = 0;
+                for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
+                {
+                    if ((d->Y[k1] < d->Y[j]) != (d->Y[k2] < d->Y[j]))
+                    {
+                        float a = d->X[k1] - d->X[k2];
+                        float b = d->Y[k2] - d->Y[k1];
+                        float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
+                        if (a * d->Y[j] + b * d->X[j] + c > 0)
+                            iInterceptions++;
+                    }
+                }
+
+                if (iInterceptions != 2)
+                    break;
+                j--;
+            }
+
+            if ((d->Y[i] <= maxY) && (d->Y[i] >= minY))
+            {
+                int iInterceptions = 0;
+                for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
+                {
+                    if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] < d->Y[i]))
+                    {
+                        float a = d->X[k1] - d->X[k2];
+                        float b = d->Y[k2] - d->Y[k1];
+                        float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
+                        if (a * d->Y[i] + b * d->X[i] + c > 0)
+                            iInterceptions++;
+                    }
+                }
+
+                if (iInterceptions == 2)
+                {
+                    swapElems(d->X[i], d->X[j]);
+                    swapElems(d->Y[i], d->Y[j]);
+                    minDists[i - hullSize] = minDists[j - hullSize];
+                    minDistAnchors[i - hullSize] = minDistAnchors[j - hullSize];
+                    j--;
+                }
+                else
+                    i++;
+            }
+            else
+                i++;
+        }
+
+        return i - hullSize;
+    }
+#endif
 
 static void setupMaxDistArrays(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors)
 {

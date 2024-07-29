@@ -33,7 +33,7 @@ int main (int argc, char *argv[])
 
     #ifdef GUI_OUTPUT
         if (d.n < 10000)
-            plotData(&d, hullSize, 0, "1920,1080", "Complete Hull");
+            plotData(&d, hullSize, 0, GNUPLOT_RES, "Complete Hull");
     #endif
 
     free(d.X);

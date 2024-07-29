@@ -12,7 +12,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/bin/debug/main",
             "args": [
-                "--file", "data/round_10e3",
+                "--file", "data/round_2x10e2",
                 "--threads", "1",
                 "--loglvl", "debug"
             ],
@@ -25,7 +25,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/bin/exec/main",
             "args": [
-                "--file", "data/round_5x10e8",
+                "--file", "data/round_2x10e2",
                 "--threads", "1",
                 "--loglvl", "trace"
             ],

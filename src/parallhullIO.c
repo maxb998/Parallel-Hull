@@ -40,7 +40,7 @@ void LOG (enum LogLevel lvl, char * line, ...)
     if (lvl > LOG_LEVEL) return;
 
     // print log level
-    printf("%s ", logLevelString[lvl]);
+    printf("\r%s ", logLevelString[lvl]);
     fflush(stdout);
 
     // print passed message and values
@@ -54,7 +54,25 @@ void LOG (enum LogLevel lvl, char * line, ...)
         printf("\n");
 }
 
-    void throwError (char * line, ...)
+void inlineLOG (enum LogLevel lvl, char * line, ...)
+{
+    // check log level
+    if (lvl > LOG_LEVEL) return;
+
+    // print log level
+    printf("\r%s ", logLevelString[lvl]);
+    fflush(stdout);
+
+    // print passed message and values
+    va_list params;
+    va_start(params, line);
+    vprintf(line, params);
+    va_end(params);
+    
+    fflush(stdout);
+}
+
+void throwError (char * line, ...)
 {
     printf("%s ", logLevelString[0]);
 
