@@ -1,4 +1,4 @@
-#include "paralhull.h"
+#include "parallhull.h"
 
 #include <argp.h>
 #include <unistd.h>

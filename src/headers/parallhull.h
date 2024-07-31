@@ -58,4 +58,4 @@ void plotData(Data *points, int hullSize, int nUncovered, const char * plotPixel
 
 size_t quickhull(Data *d);
 
-size_t parallhullThreaded(Data *d, int nThreads);
+size_t parallhullThreaded(Data *d, size_t reducedProbUB, int nThreads);

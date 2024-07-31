@@ -1,4 +1,4 @@
-#include "paralhull.h"
+#include "parallhull.h"
 
 #include <stdio.h>
 #include <time.h>
@@ -32,7 +32,7 @@ int main (int argc, char *argv[])
     LOG(LOG_LVL_NOTICE, "Quickhull finished in %lfs", quickhullTime - fileReadTime);
 
     #ifdef GUI_OUTPUT
-        if (d.n < 10000)
+        if (d.n < 200000)
             plotData(&d, hullSize, 0, GNUPLOT_RES, "Complete Hull");
     #endif
 

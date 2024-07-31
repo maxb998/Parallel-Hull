@@ -1,4 +1,4 @@
-#include "paralhull.h"
+#include "parallhull.h"
 
 #define MAX_THREADS 256
 
@@ -142,34 +142,34 @@ static size_t mergeHulls(Data d, size_t h1Size, size_t h2Size, size_t rd1ElemsCo
 
     //################## Actual merge procedure ##########################
 
-    size_t h1Index = 1, h2Index = 0; // h1Index also tracks the merged hull build
-    while ((h1Index < h1Size) || (h2Index < h2Size))
+    size_t h1Index = 1, h2Index = h1Size; // h1Index also tracks the merged hull build progress(size)
+    for (size_t h2Index = h1Size; h2Index < h1Size + h2Size; h1Index++)
     {
-        size_t h1IndexOffset = 0, h2IndexOffset = 0;
-        size_t minSlopePtGlobalPos = 0; // position in d, does not depend on which hull is a part of
+        float a,b,c;
+        size_t previousIndex = h1Index - 1;
+        a = d.X[h1Index] - d.X[previousIndex];
+        b = d.Y[previousIndex] - d.Y[h1Index];
+        c = d.X[previousIndex] * d.Y[h1Index] - d.X[h1Index] * d.Y[previousIndex];
+        
+        // now find min dist point starting from 
+        float previousDist = INFINITY;
+        float currentDist = INFINITY;
+
+        while (previousDist >= currentDist) // while distant is decreasing
         {
-            float slopes[2*AVX_VEC_SIZE];
-            register __m256 ptX = _mm256_broadcast_ss(&d.X[h1Index-1]), ptY = _mm256_broadcast_ss(&d.Y[h1Index-1]);
-            while (minSlopePtGlobalPos == 0)
+            currentDist = a * d.Y[h2Index] + b * d.X[h2Index] + c;
+            if (currentDist < 0) // candidate point is not in the final hull
             {
-                register __m256 h1PtsX, h1PtsY, h2PtsX, h2PtsY, h1Slope, h2Slope;
-                h1PtsX = _mm256_loadu_ps(&d.X[h1Index]); h1PtsY = _mm256_loadu_ps(&d.Y[h1Index]);
-                h2PtsX = _mm256_loadu_ps(&d.X[h2Index]); h2PtsY = _mm256_loadu_ps(&d.Y[h2Index]);
-                h1PtsY = _mm256_sub_ps(ptY, h1PtsY);
-                h1PtsX = _mm256_sub_ps(ptX, h1PtsX);
-                h2PtsY = _mm256_sub_ps(ptY, h2PtsY);
-                h2PtsX = _mm256_sub_ps(ptX, h2PtsX);
-                h1Slope = _mm256_div_ps(h1PtsY, h1PtsX);
-                h2Slope = _mm256_div_ps(h2PtsY, h2PtsX);
-                _mm256_storeu_ps(slopes, h1Slope);
-                _mm256_storeu_ps(&slopes[AVX_VEC_SIZE], h2Slope);
+                swapElems(d.X[h1Index], d.X[h2Index]);
+                swapElems(d.Y[h1Index], d.Y[h2Index]);
+                h2Index++;
+                break;
             }
-            for (int i = 0; i < AVX_VEC_SIZE; i++)
-            {
-                if (d)
-            }
-            
+            previousDist = currentDist;
+            h2Index++;
         }
+
+        h1Index++;
     }
 }
 

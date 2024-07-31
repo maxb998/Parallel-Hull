@@ -1,7 +1,6 @@
-#include "paralhull.h"
+#include "parallhull.h"
 
 #define SMARTMODE
-// #define USE_COMPLEX_COVERED_NODE_REMOVAL // not necessarely faster
 
 #include <math.h>
 #ifdef LOCAL_MODE
@@ -19,17 +18,10 @@ static void getExtremeCoordsPts(Data *d, size_t ptIndices[4]);
 static size_t setExtremeCoordsAsInit(Data *d, size_t ptIndices[4]);
 static size_t removeCoveredPointsSimple(Data *d, size_t hullSize, size_t nUncovered);
 #ifndef SMARTMODE
-    #ifdef USE_COMPLEX_COVERED_NODE_REMOVAL
-        static size_t removeNewlyCoveredPointsSimple(Data *d, size_t hullSize, size_t nUncovered, SuccessorData s);
-    #endif
     static SuccessorData findFarthestPtSimple(Data *d, size_t hullSize, size_t nUncovered);
     static void addPtToHullSimple(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered);
 #else
-    #ifndef USE_COMPLEX_COVERED_NODE_REMOVAL
-        static size_t removeCoveredPointsSmart(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
-    #else
-        static size_t removeNewlyCoveredPointsSmart(Data *d, size_t hullSize, size_t nUncovered, SuccessorData s, float *minDists, size_t *minDistAnchors);
-    #endif
+    static size_t removeCoveredPointsSmart(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
     static void setupMaxDistArrays(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
     static SuccessorData findFarthestPtSmart(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
     static void addPtToHullSmart(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
@@ -38,6 +30,9 @@ static size_t removeCoveredPointsSimple(Data *d, size_t hullSize, size_t nUncove
         static bool integrityCheck(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
     #endif
 #endif
+// #ifdef DEBUG
+//     static size_t coverageCheck(Data *d, size_t hullSize);
+// #endif
 
 size_t quickhull(Data *d)
 {
@@ -45,7 +40,7 @@ size_t quickhull(Data *d)
         struct timespec timeStruct;
         clock_gettime(_POSIX_MONOTONIC_CLOCK, &timeStruct);
         double startTime = cvtTimespec2Double(timeStruct);
-        double iterTime = startTime, previousIterTime;
+        double iterTime = startTime, previousIterTime = 0;
         int iterCount = 0, shiftAmount = -1;
     #endif
 
@@ -58,9 +53,11 @@ size_t quickhull(Data *d)
     nUncovered = removeCoveredPointsSimple(d, hullSize, nUncovered);
 
     #ifdef SMARTMODE
-        float *minDists = malloc(nUncovered * (sizeof(float) + sizeof(size_t)));
-        if (minDists == NULL)
+        float *minDistsAllocPtr = malloc(nUncovered * (sizeof(float) + sizeof(size_t)));
+        if (minDistsAllocPtr == NULL)
             throwError("Could not allocate %lu bytes of memory for the minDists structures", nUncovered * sizeof(float) + nUncovered + sizeof(size_t));
+            
+        float *minDists = minDistsAllocPtr;
         size_t *minDistAnchors = (size_t*)(&minDists[nUncovered]);
         setupMaxDistArrays(d, hullSize, nUncovered, minDists, minDistAnchors);
     #endif
@@ -93,25 +90,18 @@ size_t quickhull(Data *d)
             addPtToHullSimple(d, s, hullSize, nUncovered);
             hullSize++;
             nUncovered--;
-            #ifndef USE_COMPLEX_COVERED_NODE_REMOVAL
-                nUncovered = removeCoveredPointsSimple(d, hullSize, nUncovered);
-            #else
-                nUncovered = removeNewlyCoveredPointsSimple(d, hullSize, nUncovered, s);
-            #endif
+            nUncovered = removeCoveredPointsSimple(d, hullSize, nUncovered);
         #else
             SuccessorData s = findFarthestPtSmart(d, hullSize, nUncovered, minDists, minDistAnchors);
             addPtToHullSmart(d, s, hullSize, nUncovered, minDists, minDistAnchors);
+            minDists++; minDistAnchors++;
             hullSize++;
             #ifdef DEBUG
                 size_t oldNUncovered = nUncovered;
             #endif
 
             nUncovered--;
-            #ifndef USE_COMPLEX_COVERED_NODE_REMOVAL
-                nUncovered = removeCoveredPointsSmart(d, hullSize, nUncovered, minDists, minDistAnchors);
-            #else
-                nUncovered = removeNewlyCoveredPointsSmart(d, hullSize, nUncovered, s, minDists, minDistAnchors);
-            #endif
+            nUncovered = removeCoveredPointsSmart(d, hullSize, nUncovered, minDists, minDistAnchors);
             adaptMinArrays(d, s, hullSize, nUncovered, minDists, minDistAnchors);
             #ifdef DEBUG
                 if (integrityCheck(d, hullSize, nUncovered, minDists, minDistAnchors))
@@ -120,19 +110,20 @@ size_t quickhull(Data *d)
         #endif
     }
 
-    #ifdef DEBUG
-        nUncovered = d->n - hullSize;
-        nUncovered = removeCoveredPointsSimple(d, hullSize, nUncovered);
-        if (nUncovered != 0)
-            throwError("There are still some points that are not inside the hull");
-    #endif
-
     #ifdef LOCAL_MODE
         LOG(LOG_LVL_TRACE, "iteration %5d took %.3es. nUncovered=%.3e, hullSize=%ld", iterCount, iterTime-previousIterTime, (float)nUncovered, hullSize);
     #endif
 
+    #ifdef DEBUG
+        LOG(LOG_LVL_WARN, "DEBUG macro is defined! Now checking whether all points are actually inside the hull");
+        nUncovered = d->n - hullSize;
+        nUncovered = removeCoveredPointsSimple(d, hullSize, nUncovered);
+        if (nUncovered != 0)
+            throwError("There are still %ld points that are not inside the hull", nUncovered);
+    #endif
+
     #ifdef SMARTMODE
-        free(minDists);
+        free(minDistsAllocPtr);
     #endif
     return hullSize;
 }
@@ -201,19 +192,43 @@ static size_t removeCoveredPointsSimple(Data *d, size_t hullSize, size_t nUncove
         {
             if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] < d->Y[i]))
             {
-                float a = d->X[k1] - d->X[k2];
-                float b = d->Y[k2] - d->Y[k1];
-                float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
-                if (a * d->Y[i] + b * d->X[i] + c > 0)
+                double a = (double)d->X[k1] - d->X[k2];
+                double b = (double)d->Y[k2] - d->Y[k1];
+                double c = (double)d->X[k2] * d->Y[k1] - (double)d->X[k1] * d->Y[k2];
+                double dist = a * d->Y[i] + b * d->X[i] + c;
+                if (dist >= 0)
                     iIsCovered = !iIsCovered;
             }
         }
 
         if (iIsCovered)
         {
+            while(i < j)
+            {
+                bool jIsCovered = true;
+                for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
+                {
+                    if ((d->Y[k1] < d->Y[j]) != (d->Y[k2] < d->Y[j]))
+                    {
+                        double a = (double)d->X[k1] - d->X[k2];
+                        double b = (double)d->Y[k2] - d->Y[k1];
+                        double c = (double)d->X[k2] * d->Y[k1] - (double)d->X[k1] * d->Y[k2];
+                        double dist = a * d->Y[j] + b * d->X[j] + c;
+                        if (dist >= 0)
+                            jIsCovered = !jIsCovered;
+                    }
+                }
+                if (jIsCovered)
+                    j--;
+                else break;
+            }
+
+            if (j == i) break; // all points up to i included are covered by the current hull
+
             swapElems(d->X[i], d->X[j]);
             swapElems(d->Y[i], d->Y[j]);
             j--;
+            i++; // if j was covered there is no need to check i in the next iteration
         }
         else
             i++;
@@ -223,75 +238,6 @@ static size_t removeCoveredPointsSimple(Data *d, size_t hullSize, size_t nUncove
 }
 
 #ifndef SMARTMODE
-#ifdef USE_COMPLEX_COVERED_NODE_REMOVAL
-    static size_t removeNewlyCoveredPointsSimple(Data *d, size_t hullSize, size_t nUncovered, SuccessorData s)
-    {
-        size_t i = hullSize;
-        size_t j = nUncovered + hullSize - 1; // position of last covered element in d->X and d->Y
-
-        float minY = d->Y[s.anchor], maxY = d->Y[s.anchor+2];
-        if (s.anchor + 2 == hullSize)
-            maxY = d->Y[0];
-        if (minY > maxY)
-            swapElems(minY, maxY);
-        if (minY > d->Y[s.anchor+1])
-            minY = d->Y[s.anchor+1];
-        else if (maxY < d->Y[s.anchor+1])
-            maxY = d->Y[s.anchor+1];
-
-        while (i <= j)
-        {
-            while ((j > i) && ((d->Y[j] > maxY) || (d->Y[j] < minY)))
-            {
-                int iInterceptions = 0;
-                for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
-                {
-                    if ((d->Y[k1] < d->Y[j]) != (d->Y[k2] < d->Y[j]))
-                    {
-                        float a = d->X[k1] - d->X[k2];
-                        float b = d->Y[k2] - d->Y[k1];
-                        float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
-                        if (a * d->Y[j] + b * d->X[j] + c > 0)
-                            iInterceptions++;
-                    }
-                }
-
-                if (iInterceptions != 2)
-                    break;
-                j--;
-            }
-
-            if ((d->Y[i] <= maxY) && (d->Y[i] >= minY))
-            {
-                int iInterceptions = 0;
-                for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
-                {
-                    if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] < d->Y[i]))
-                    {
-                        float a = d->X[k1] - d->X[k2];
-                        float b = d->Y[k2] - d->Y[k1];
-                        float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
-                        if (a * d->Y[i] + b * d->X[i] + c > 0)
-                            iInterceptions++;
-                    }
-                }
-
-                if (iInterceptions == 2)
-                {
-                    swapElems(d->X[i], d->X[j]);
-                    swapElems(d->Y[i], d->Y[j]);
-                    j--;
-                }
-                else
-                    i++;
-            }
-            else
-                i++;
-        }
-
-        return i - hullSize;
-    }
-#endif
 
 static SuccessorData findFarthestPtSimple(Data *d, size_t hullSize, size_t nUncovered)
 {
@@ -377,113 +323,63 @@ static SuccessorData findFarthestPtSmart(Data *d, size_t hullSize, size_t nUncov
     return farPt;
 }
 
-#ifndef USE_COMPLEX_COVERED_NODE_REMOVAL
-    static size_t removeCoveredPointsSmart(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors)
+static size_t removeCoveredPointsSmart(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors)
+{
+    size_t i = hullSize;
+    size_t j = nUncovered + hullSize - 1;
+    while (i <= j)
     {
-        size_t i = hullSize;// i2 = 0;
-        size_t j = nUncovered + hullSize - 1;// j2 = nUncovered; // position of last covered element in d->X and d->Y
-        while (i <= j)
+        bool iIsCovered = true;
+        for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
         {
-            bool iIsCovered = true;
-            for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
+            if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] < d->Y[i]))
             {
-                if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] < d->Y[i]))
-                {
-                    float a = d->X[k1] - d->X[k2];
-                    float b = d->Y[k2] - d->Y[k1];
-                    float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
-                    if (a * d->Y[i] + b * d->X[i] + c > 0)
-                        iIsCovered = !iIsCovered;
-                }
-            }
-
-            if (iIsCovered)
-            {
-                swapElems(d->X[i], d->X[j]);
-                swapElems(d->Y[i], d->Y[j]);
-                minDists[i - hullSize] = minDists[j - hullSize];
-                minDistAnchors[i - hullSize] = minDistAnchors[j - hullSize];
-                j--; //j2--;
-            }
-            else
-            {
-                i++; //i2++;
+                double a = (double)d->X[k1] - d->X[k2];
+                double b = (double)d->Y[k2] - d->Y[k1];
+                double c = (double)d->X[k2] * d->Y[k1] - (double)d->X[k1] * d->Y[k2];
+                double dist = a * d->Y[i] + b * d->X[i] + c;
+                if (dist >= 0)
+                    iIsCovered = !iIsCovered;
             }
         }
 
-        return i - hullSize;
-    }
-#else
-    static size_t removeNewlyCoveredPointsSmart(Data *d, size_t hullSize, size_t nUncovered, SuccessorData s, float *minDists, size_t *minDistAnchors)
-    {
-        size_t i = hullSize;
-        size_t j = nUncovered + hullSize - 1; // position of last covered element in d->X and d->Y
-
-        float minY = d->Y[s.anchor], maxY = d->Y[s.anchor+2];
-        if (s.anchor + 2 == hullSize)
-            maxY = d->Y[0];
-        if (minY > maxY)
-            swapElems(minY, maxY);
-        if (minY > d->Y[s.anchor+1])
-            minY = d->Y[s.anchor+1];
-        else if (maxY < d->Y[s.anchor+1])
-            maxY = d->Y[s.anchor+1];
-
-        while (i <= j)
+        if (iIsCovered)
         {
-            while ((j > i) && ((d->Y[j] > maxY) || (d->Y[j] < minY)))
+            while(i < j)
             {
-                int iInterceptions = 0;
+                bool jIsCovered = true;
                 for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
                 {
                     if ((d->Y[k1] < d->Y[j]) != (d->Y[k2] < d->Y[j]))
                     {
-                        float a = d->X[k1] - d->X[k2];
-                        float b = d->Y[k2] - d->Y[k1];
-                        float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
-                        if (a * d->Y[j] + b * d->X[j] + c > 0)
-                            iInterceptions++;
+                        double a = (double)d->X[k1] - d->X[k2];
+                        double b = (double)d->Y[k2] - d->Y[k1];
+                        double c = (double)d->X[k2] * d->Y[k1] - (double)d->X[k1] * d->Y[k2];
+                        double dist = a * d->Y[j] + b * d->X[j] + c;
+                        if (dist >= 0)
+                            jIsCovered = !jIsCovered;
                     }
                 }
-
-                if (iInterceptions != 2)
-                    break;
-                j--;
-            }
-
-            if ((d->Y[i] <= maxY) && (d->Y[i] >= minY))
-            {
-                int iInterceptions = 0;
-                for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
-                {
-                    if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] < d->Y[i]))
-                    {
-                        float a = d->X[k1] - d->X[k2];
-                        float b = d->Y[k2] - d->Y[k1];
-                        float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
-                        if (a * d->Y[i] + b * d->X[i] + c > 0)
-                            iInterceptions++;
-                    }
-                }
-
-                if (iInterceptions == 2)
-                {
-                    swapElems(d->X[i], d->X[j]);
-                    swapElems(d->Y[i], d->Y[j]);
-                    minDists[i - hullSize] = minDists[j - hullSize];
-                    minDistAnchors[i - hullSize] = minDistAnchors[j - hullSize];
+                if (jIsCovered)
                     j--;
-                }
-                else
-                    i++;
+                else break;
             }
-            else
-                i++;
-        }
+            
+            if (j == i) break; // all points up to i included are covered by the current hull
 
-        return i - hullSize;
+            swapElems(d->X[i], d->X[j]);
+            swapElems(d->Y[i], d->Y[j]);
+            minDists[i - hullSize] = minDists[j - hullSize];
+            minDistAnchors[i - hullSize] = minDistAnchors[j - hullSize];
+            j--;
+            i++;
+        }
+        else
+            i++;
     }
-#endif
+
+    return i - hullSize;
+}
 
 static void setupMaxDistArrays(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors)
 {
@@ -524,11 +420,6 @@ static void addPtToHullSmart(Data *d, SuccessorData pt, size_t hullSize, size_t 
     swapElems(d->Y[hullSize], d->Y[pt.node]);
     minDists[pt.node-hullSize] = minDists[0];
     minDistAnchors[pt.node-hullSize] = minDistAnchors[0];
-    for (size_t i = 0; i < nUncovered-1; i++)
-    {
-        minDists[i] = minDists[i+1];
-        minDistAnchors[i] = minDistAnchors[i+1];
-    }
 
     float xBak = d->X[hullSize], yBak = d->Y[hullSize];
     for (size_t i = hullSize-1; i > pt.anchor; i--)
@@ -638,3 +529,57 @@ static bool integrityCheck(Data *d, size_t hullSize, size_t nUncovered, float *m
 }
 #endif
 #endif
+
+// #ifdef DEBUG
+//     static size_t coverageCheck(Data *d, size_t hullSize)
+//     {
+//         size_t i = hullSize;
+//         size_t j = d->n - hullSize; // position of last covered element in d->X and d->Y
+//         while (i <= j)
+//         {
+//             bool iIsCovered = true;
+//             for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
+//             {
+//                 if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] < d->Y[i]))
+//                 {
+//                     float a = d->X[k1] - d->X[k2];
+//                     float b = d->Y[k2] - d->Y[k1];
+//                     float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
+//                     float dist = a * d->Y[i] + b * d->X[i] + c;
+//                     if (dist >= 0)
+//                         iIsCovered = !iIsCovered;
+//                 }
+//             }
+
+//             if (iIsCovered)
+//             {
+//                 while(i < j)
+//                 {
+//                     bool jIsCovered = true;
+//                     for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
+//                     {
+//                         if ((d->Y[k1] < d->Y[j]) != (d->Y[k2] < d->Y[j]))
+//                         {
+//                             float a = d->X[k1] - d->X[k2];
+//                             float b = d->Y[k2] - d->Y[k1];
+//                             float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
+//                             float dist = a * d->Y[j] + b * d->X[j] + c;
+//                             if (dist >= 0)
+//                                 jIsCovered = !jIsCovered;
+//                         }
+//                     }
+//                     if (jIsCovered)
+//                         j--;
+//                     else break;
+//                 }
+//                 swapElems(d->X[i], d->X[j]);
+//                 swapElems(d->Y[i], d->Y[j]);
+//                 j--;
+//             }
+//             else
+//                 i++;
+//         }
+
+//         return i - hullSize;
+//     }
+// #endif

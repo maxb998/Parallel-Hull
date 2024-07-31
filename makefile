@@ -7,7 +7,7 @@ HEADERS_DIR := src/headers/
 # build debug as default
 OBJ_DIR = obj/debug/
 BIN_DIR = bin/debug/
-CFLAGS = -Wall -g -mavx2 -Isrc/headers
+CFLAGS = -Wall -g -mavx2 -ffast-math -Isrc/headers
 LDFLAGS = -lm
 
 # condition to check value passed
@@ -19,7 +19,7 @@ endif
 
 SOURCE_NAMES = main.c argParser.c parallhullIO.c quickhull.c parallhull.c
 
-HEADER_NAMES = paralhull.h
+HEADER_NAMES = parallhull.h
 
 # files list
 HEADER_FILES := $(HEADER_NAMES:%=$(HEADERS_DIR)%)
