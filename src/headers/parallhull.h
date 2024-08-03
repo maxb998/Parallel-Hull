@@ -3,10 +3,10 @@
 
 #define AVX_VEC_SIZE 8
 
-// #define LOCAL_DEBUG
+// #define QUICKHULL_STEP_DEBUG // plots data useful for debug at each iteration of the quickhull algorithm
 #define DEBUG
 #define GUI_OUTPUT
-#define LOCAL_MODE
+// #define NON_MPI_MODE
 
 #define GNUPLOT_RES "1600,900"
 
@@ -54,8 +54,8 @@ Params argParse(int argc, char *argv[]);
 
 void readFile(Data *d, Params *p);
 
-void plotData(Data *points, int hullSize, int nUncovered, const char * plotPixelSize, const char * title);
+void plotData(Data *points, Data *hull, int nUncovered, const char * plotPixelSize, const char * title);
 
-size_t quickhull(Data *d);
+size_t quickhull(Data *d, int threadID);
 
-size_t parallhullThreaded(Data *d, size_t reducedProbUB, int nThreads);
+Data parallhullThreaded(Data *d, size_t reducedProblemUB, int nThreads);

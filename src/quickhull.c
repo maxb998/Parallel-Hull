@@ -3,8 +3,9 @@
 #define SMARTMODE
 
 #include <math.h>
-#ifdef LOCAL_MODE
+#ifdef NON_MPI_MODE
     #include <time.h>
+    #include <stdio.h>
     #include <unistd.h> // needed to get the _POSIX_MONOTONIC_CLOCK and measure time
 #endif
 
@@ -30,18 +31,19 @@ static size_t removeCoveredPointsSimple(Data *d, size_t hullSize, size_t nUncove
         static bool integrityCheck(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
     #endif
 #endif
-// #ifdef DEBUG
-//     static size_t coverageCheck(Data *d, size_t hullSize);
-// #endif
 
-size_t quickhull(Data *d)
+size_t quickhull(Data *d, int threadID)
 {
-    #ifdef LOCAL_MODE
+    double startTime, iterTime, previousIterTime;
+    int iterCount = 0, shiftAmount = -1;
+
+    #ifdef NON_MPI_MODE
         struct timespec timeStruct;
         clock_gettime(_POSIX_MONOTONIC_CLOCK, &timeStruct);
-        double startTime = cvtTimespec2Double(timeStruct);
-        double iterTime = startTime, previousIterTime = 0;
-        int iterCount = 0, shiftAmount = -1;
+        startTime = cvtTimespec2Double(timeStruct);
+        iterTime = startTime;
+        previousIterTime = 0;
+    #else
     #endif
 
     // init
@@ -64,24 +66,26 @@ size_t quickhull(Data *d)
 
     while (nUncovered > 0)
     {
-        #ifdef LOCAL_MODE
-            iterCount++;    
+        iterCount++;   
+        #ifdef NON_MPI_MODE 
             previousIterTime = iterTime;
             clock_gettime(_POSIX_MONOTONIC_CLOCK, &timeStruct);
             iterTime = cvtTimespec2Double(timeStruct);
-            inlineLOG(LOG_LVL_TRACE, "iteration %5d took %.3es. nUncovered=%.3e, hullSize=%ld", iterCount, iterTime-previousIterTime, (float)nUncovered, hullSize);
-            if ((iterCount >> shiftAmount) || (iterCount < 3))
-            {
-                LOG(LOG_LVL_INFO, "iteration %5d completed after %.3es from begining. nUncovered=%.3e, hullSize=%ld", iterCount, iterTime-startTime, (float)nUncovered, hullSize);
-                shiftAmount++;
-            }
         #endif
 
-        #ifdef LOCAL_DEBUG
+        inlineLOG(LOG_LVL_TRACE, "quickhull: thread %d; iteration %5d took %.3es. nUncovered=%.3e, hullSize=%ld", threadID, iterCount, iterTime-previousIterTime, (float)nUncovered, hullSize);
+        if ((iterCount >> shiftAmount) || (iterCount < 3))
+        {
+            LOG(LOG_LVL_TRACE, "quickhull: thread %d; iteration %5d completed after %.3es from begining. nUncovered=%.3e, hullSize=%ld", threadID, iterCount, iterTime-startTime, (float)nUncovered, hullSize);
+            shiftAmount++;
+        }
+        
+        #if defined(QUICKHULL_STEP_DEBUG) && defined(NON_MPI_MODE)
             // show partial hull with gnuplot at each iteration and wait for user input to resume
             char plotTitle[200];
             sprintf(plotTitle, "Partial Hull: size=%lu, uncovered=%lu", hullSize, nUncovered);
-            plotData(d, hullSize, nUncovered, GNUPLOT_RES, plotTitle);
+            Data hull = { .n=hullSize, .X=d->X, .Y=d->Y };
+            plotData(d, &hull, nUncovered, GNUPLOT_RES, plotTitle);
             getchar();
         #endif
 
@@ -110,9 +114,7 @@ size_t quickhull(Data *d)
         #endif
     }
 
-    #ifdef LOCAL_MODE
-        LOG(LOG_LVL_TRACE, "iteration %5d took %.3es. nUncovered=%.3e, hullSize=%ld", iterCount, iterTime-previousIterTime, (float)nUncovered, hullSize);
-    #endif
+    LOG(LOG_LVL_TRACE, "quickhull: thread %d; iteration %5d took %.3es. nUncovered=%.3e, hullSize=%ld", threadID, iterCount, iterTime-previousIterTime, (float)nUncovered, hullSize);
 
     #ifdef DEBUG
         LOG(LOG_LVL_WARN, "DEBUG macro is defined! Now checking whether all points are actually inside the hull");
@@ -521,65 +523,9 @@ static bool integrityCheck(Data *d, size_t hullSize, size_t nUncovered, float *m
             quit = true;
             LOG(LOG_LVL_ERROR, "@[%ld] minDistAnchors=%ld instead of %ld", i2, minDistAnchors[i2], closestAnchor);
         }
-        // else
-        //     LOG(LOG_LVL_INFO, "@[%ld] all ok", i2);
     }
     
     return quit;
 }
 #endif
 #endif
-
-// #ifdef DEBUG
-//     static size_t coverageCheck(Data *d, size_t hullSize)
-//     {
-//         size_t i = hullSize;
-//         size_t j = d->n - hullSize; // position of last covered element in d->X and d->Y
-//         while (i <= j)
-//         {
-//             bool iIsCovered = true;
-//             for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
-//             {
-//                 if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] < d->Y[i]))
-//                 {
-//                     float a = d->X[k1] - d->X[k2];
-//                     float b = d->Y[k2] - d->Y[k1];
-//                     float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
-//                     float dist = a * d->Y[i] + b * d->X[i] + c;
-//                     if (dist >= 0)
-//                         iIsCovered = !iIsCovered;
-//                 }
-//             }
-
-//             if (iIsCovered)
-//             {
-//                 while(i < j)
-//                 {
-//                     bool jIsCovered = true;
-//                     for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
-//                     {
-//                         if ((d->Y[k1] < d->Y[j]) != (d->Y[k2] < d->Y[j]))
-//                         {
-//                             float a = d->X[k1] - d->X[k2];
-//                             float b = d->Y[k2] - d->Y[k1];
-//                             float c = d->X[k2] * d->Y[k1] - d->X[k1] * d->Y[k2];
-//                             float dist = a * d->Y[j] + b * d->X[j] + c;
-//                             if (dist >= 0)
-//                                 jIsCovered = !jIsCovered;
-//                         }
-//                     }
-//                     if (jIsCovered)
-//                         j--;
-//                     else break;
-//                 }
-//                 swapElems(d->X[i], d->X[j]);
-//                 swapElems(d->Y[i], d->Y[j]);
-//                 j--;
-//             }
-//             else
-//                 i++;
-//         }
-
-//         return i - hullSize;
-//     }
-// #endif

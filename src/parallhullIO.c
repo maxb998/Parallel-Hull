@@ -106,7 +106,7 @@ void readFile(Data *d, Params *p)
     fclose(fileptr);
 }
 
-void plotData(Data *points, int hullSize, int nUncovered, const char * plotPixelSize, const char * title)
+void plotData(Data *points, Data *hull, int nUncovered, const char * plotPixelSize, const char * title)
 {
     // creating the pipeline for gnuplot
     FILE *gnuplotPipe = popen("gnuplot -persistent 2>/dev/null ", "w");
@@ -126,22 +126,22 @@ void plotData(Data *points, int hullSize, int nUncovered, const char * plotPixel
     fprintf(gnuplotPipe, "plot '-' with point linestyle 1, '-' with point linestyle 2, '-' with point linestyle 3, '-' with linespoint linestyle 4\n");
 
     // first plot only the points
-    for (int i = hullSize + nUncovered; i < points->n; i++)
+    for (int i = hull->n + nUncovered; i < points->n; i++)
         fprintf(gnuplotPipe, "%f %f\n", points->X[i], points->Y[i]);
     fprintf(gnuplotPipe, "e\n");
 
-    for (int i = hullSize; i < hullSize + nUncovered; i++)
+    for (int i = hull->n; i < hull->n + nUncovered; i++)
         fprintf(gnuplotPipe, "%f %f\n", points->X[i], points->Y[i]);
     fprintf(gnuplotPipe, "e\n");
 
-    for (int i = 0; i < hullSize; i++)
-        fprintf(gnuplotPipe, "%f %f\n", points->X[i], points->Y[i]);
+    for (int i = 0; i < hull->n; i++)
+        fprintf(gnuplotPipe, "%f %f\n", hull->X[i], hull->Y[i]);
     fprintf(gnuplotPipe, "e\n");
 
     // second print the tour
-    for (int i = 0; i < hullSize; i++)
-        fprintf(gnuplotPipe, "%f %f\n", points->X[i], points->Y[i]);
-    fprintf(gnuplotPipe, "%f %f\n", points->X[0], points->Y[0]);
+    for (int i = 0; i < hull->n; i++)
+        fprintf(gnuplotPipe, "%f %f\n", hull->X[i], hull->Y[i]);
+    fprintf(gnuplotPipe, "%f %f\n", hull->X[0], hull->Y[0]);
     fprintf(gnuplotPipe, "e\n");
 
     // force write on stream

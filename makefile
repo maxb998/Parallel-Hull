@@ -1,5 +1,5 @@
 # compiler name (gcc seems to use smarter tricks since the executable is faster when using gcc instead of clang on an arch linux machine)
-CC = gcc
+CC = mpicc
 
 SRC_DIR := src/
 HEADERS_DIR := src/headers/
