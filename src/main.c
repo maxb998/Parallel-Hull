@@ -32,14 +32,15 @@ int main (int argc, char *argv[])
     LOG(LOG_LVL_DEBUG, "Check endianity of raw file content: X[0]=%f  X[1]=%f", d.X[0], d.X[1]);
     LOG(LOG_LVL_NOTICE, "File read in %lfs", fileReadTime - startTime);
 
-    Data hull = parallhullThreaded(&d, -1L, p.nThreads);
+    Data hull = parallhullThreaded(&d, -1, 0, p.nThreads);
     clock_gettime(_POSIX_MONOTONIC_CLOCK, &timeStruct);
     quickhullTime = cvtTimespec2Double(timeStruct);
-    LOG(LOG_LVL_NOTICE, "Quickhull finished in %lfs", quickhullTime - fileReadTime);
+    LOG(LOG_LVL_NOTICE, "Parallhull finished in %lfs", quickhullTime - fileReadTime);
+    LOG(LOG_LVL_INFO, "Final Hull size = %ld", hull.n);
 
     #ifdef GUI_OUTPUT
         if (d.n < 200000)
-            plotData(&d, &hull, 0, GNUPLOT_RES, "Complete Hull");
+            plotData(&d, &hull, 0, "Complete Hull");
     #endif
 
     free(d.X);
@@ -81,24 +82,29 @@ int main (int argc, char *argv[])
         LOG(LOG_LVL_NOTICE, "MPI init took %lfs", initTime - startTime);
     }
 
+    size_t n = readFile(&d, &p, rank);
+    
+    //MPI_Barrier(MPI_COMM_WORLD);
+
     if (rank == 0)
     {
-        readFile(&d, &p);
         fileReadTime = MPI_Wtime();
-
         LOG(LOG_LVL_DEBUG, "Check endianity of raw file content: X[0]=%f  X[1]=%f", d.X[0], d.X[1]);
         LOG(LOG_LVL_NOTICE, "File read in %lfs", fileReadTime - startTime);
     }
 
-    MPIErrCode = MPI_Bcast(&d.n, 1, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
-    if (MPIErrCode != MPI_SUCCESS)
-        throwError("MPI_Bcast failed with code %d", MPIErrCode);
-    
-    size_t n = d.n;
-    size_t reducedSize = (size_t)ceil((double)n / p.nProcs);
+    Data hull = parallhullThreaded(&d, -1, p.nThreads);
 
     if (rank == 0)
-        LOG(LOG_LVL_NOTICE, "Quickhull finished in %lfs", quickhullTime - fileReadTime);
+        LOG(LOG_LVL_NOTICE, "Local quickhull finished in %lfs", quickhullTime - fileReadTime);
+    
+    int nParts = p.nProcs;
+    while (nParts > 1)
+    {
+        
+    }
+    
+    
 
     #if defined(GUI_OUTPUT)
         if ((rank == 0) && (d.n < 200000))

@@ -28,11 +28,14 @@ static size_t removeCoveredPointsSimple(Data *d, size_t hullSize, size_t nUncove
     static void addPtToHullSmart(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
     static void adaptMinArrays(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
     #ifdef DEBUG
-        static bool integrityCheck(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
+        static bool integrityCheck(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors, ProcThreadIDCombo *id);
     #endif
 #endif
+#ifdef DEBUG
+    static bool hullConvexityCheck(Data *h, size_t hullSize, ProcThreadIDCombo *id);
+#endif
 
-size_t quickhull(Data *d, int threadID)
+size_t quickhull(Data *d, ProcThreadIDCombo *id)
 {
     double startTime, iterTime, previousIterTime;
     int iterCount = 0, shiftAmount = -1;
@@ -73,10 +76,10 @@ size_t quickhull(Data *d, int threadID)
             iterTime = cvtTimespec2Double(timeStruct);
         #endif
 
-        inlineLOG(LOG_LVL_TRACE, "quickhull: thread %d; iteration %5d took %.3es. nUncovered=%.3e, hullSize=%ld", threadID, iterCount, iterTime-previousIterTime, (float)nUncovered, hullSize);
+        inlineLOG(LOG_LVL_TRACE, "p[%2d] t[%3d] quickhull: Iteration %5d took %.3es. nUncovered=%.3e, hullSize=%ld", id->p, id->t, iterCount, iterTime-previousIterTime, (float)nUncovered, hullSize);
         if ((iterCount >> shiftAmount) || (iterCount < 3))
         {
-            LOG(LOG_LVL_TRACE, "quickhull: thread %d; iteration %5d completed after %.3es from begining. nUncovered=%.3e, hullSize=%ld", threadID, iterCount, iterTime-startTime, (float)nUncovered, hullSize);
+            LOG(LOG_LVL_TRACE, "p[%2d] t[%3d] quickhull: Iteration %5d completed after %.3es from begining. nUncovered=%.3e, hullSize=%ld", id->p, id->t, iterCount, iterTime-startTime, (float)nUncovered, hullSize);
             shiftAmount++;
         }
         
@@ -85,7 +88,7 @@ size_t quickhull(Data *d, int threadID)
             char plotTitle[200];
             sprintf(plotTitle, "Partial Hull: size=%lu, uncovered=%lu", hullSize, nUncovered);
             Data hull = { .n=hullSize, .X=d->X, .Y=d->Y };
-            plotData(d, &hull, nUncovered, GNUPLOT_RES, plotTitle);
+            plotData(d, &hull, nUncovered, plotTitle);
             getchar();
         #endif
 
@@ -106,22 +109,31 @@ size_t quickhull(Data *d, int threadID)
 
             nUncovered--;
             nUncovered = removeCoveredPointsSmart(d, hullSize, nUncovered, minDists, minDistAnchors);
-            adaptMinArrays(d, s, hullSize, nUncovered, minDists, minDistAnchors);
+            if (hullSize <= 3)
+                setupMaxDistArrays(d, hullSize, nUncovered, minDists, minDistAnchors);
+            else
+                adaptMinArrays(d, s, hullSize, nUncovered, minDists, minDistAnchors);
             #ifdef DEBUG
-                if (integrityCheck(d, hullSize, nUncovered, minDists, minDistAnchors))
-                    throwError("Error detected in values inside minDist* arrays. n=%ld, hullSize=%ld, nUncovered=%ld, oldNUncovered=%ld, s.node=%ld, s.anchor=%ld", d->n, hullSize, nUncovered, oldNUncovered, s.node, s.anchor);
+                if (integrityCheck(d, hullSize, nUncovered, minDists, minDistAnchors, id))
+                    throwError("p[%2d] t[%3d] quickhull: Error detected in values inside minDist* arrays. n=%ld, hullSize=%ld, nUncovered=%ld, oldNUncovered=%ld, s.node=%ld, s.anchor=%ld", id->p, id->t, d->n, hullSize, nUncovered, oldNUncovered, s.node, s.anchor);
             #endif
+        #endif
+
+        #ifdef DEBUG
+            if (hullConvexityCheck(d, hullSize, id))
+                throwError("p[%2d] t[%3d] quickhull: Hull is not convex. n=%ld, hullSize=%ld, nUncovered=%ld, oldNUncovered=%ld, s.node=%ld, s.anchor=%ld", id->p, id->t, d->n, hullSize, nUncovered, oldNUncovered, s.node, s.anchor);
+
         #endif
     }
 
-    LOG(LOG_LVL_TRACE, "quickhull: thread %d; iteration %5d took %.3es. nUncovered=%.3e, hullSize=%ld", threadID, iterCount, iterTime-previousIterTime, (float)nUncovered, hullSize);
+    LOG(LOG_LVL_TRACE, "p[%2d] t[%3d] quickhull: Iteration %5d took %.3es. nUncovered=%.3e, hullSize=%ld", id->p, id->t, iterCount, iterTime-previousIterTime, (float)nUncovered, hullSize);
 
     #ifdef DEBUG
-        LOG(LOG_LVL_WARN, "DEBUG macro is defined! Now checking whether all points are actually inside the hull");
+        LOG(LOG_LVL_DEBUG, "p[%2d] t[%3d] quickhull: DEBUG macro is defined! Now checking whether all points are actually inside the hull", id->p, id->t);
         nUncovered = d->n - hullSize;
         nUncovered = removeCoveredPointsSimple(d, hullSize, nUncovered);
         if (nUncovered != 0)
-            throwError("There are still %ld points that are not inside the hull", nUncovered);
+            throwError("p[%2d] t[%3d] quickhull: There are still %ld points that are not inside the hull", id->p, id->t, nUncovered);
     #endif
 
     #ifdef SMARTMODE
@@ -137,14 +149,18 @@ static void getExtremeCoordsPts(Data *d, size_t ptIndices[4])
     
     for (size_t i = 1; i < d->n; i++)
     {
-        if (d->X[i] > d->X[ptIndices[1]]) //xMax
+        if  ((d->X[i] > d->X[ptIndices[1]]) || 
+            ((d->X[i] == d->X[ptIndices[1]]) && (d->Y[i] > d->Y[ptIndices[1]]))) //xMax rightmust upward if multiple choices
             ptIndices[1] = i;
-        else if (d->X[i] < d->X[ptIndices[3]]) //xMin
+        else if ((d->X[i] < d->X[ptIndices[3]]) || 
+                ((d->X[i] == d->X[ptIndices[3]]) && (d->Y[i] < d->Y[ptIndices[3]]))) //xMin leftmost loward if multiple choices
             ptIndices[3] = i;
 
-        if (d->Y[i] > d->Y[ptIndices[2]]) //yMax
+        if ((d->Y[i] > d->Y[ptIndices[2]]) || 
+            ((d->Y[i] == d->Y[ptIndices[2]]) && (d->X[i] < d->X[ptIndices[2]]))) //yMax upmost leftward if multiple choices
             ptIndices[2] = i;
-        else if (d->Y[i] < d->Y[ptIndices[0]]) //yMin
+        else if ((d->Y[i] < d->Y[ptIndices[0]]) || 
+                ((d->Y[i] == d->Y[ptIndices[0]]) && (d->X[i] > d->X[ptIndices[0]]))) //yMin lowmost rightward if multiple choices
             ptIndices[0] = i;
     }
 }
@@ -152,30 +168,31 @@ static void getExtremeCoordsPts(Data *d, size_t ptIndices[4])
 static size_t setExtremeCoordsAsInit(Data *d, size_t ptIndices[4])
 {    
     // check extreme coords for duplicates
-    if (ptIndices[2] == ptIndices[0])
-        ptIndices[2] = -1;
-    if (ptIndices[3] == ptIndices[0])
-        ptIndices[3] = -1;
-    if (ptIndices[2] == ptIndices[1])
-        ptIndices[2] = -1;
-    if (ptIndices[3] == ptIndices[1])
-        ptIndices[3] = -1;
+    for (int i = 0; i < 3; i++)
+    {
+        if (ptIndices[i] == -1) break;
+
+        for (int j = i+1; j < 4; j++)
+        {
+            if (ptIndices[i] == ptIndices[j])
+            {
+                ptIndices[j] = -1;
+                for (int k = j; k < 3; k++)
+                    swapElems(ptIndices[k], ptIndices[k+1])
+            }
+        }
+    }
     
     size_t hullSize = 0;
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; (i < 4) && (ptIndices[i] != -1); i++)
     {
-        if (ptIndices[i] == -1)
-            continue;
-
-        int minSubIndex = 0;
-        for (int j = 1; j < 4; j++)
-            if (ptIndices[minSubIndex] > ptIndices[j] && ptIndices[j] != -1)
-                minSubIndex = j;
-
-        swapElems(d->X[minSubIndex], d->X[ptIndices[minSubIndex]]);
-        swapElems(d->Y[minSubIndex], d->Y[ptIndices[minSubIndex]]);
-
-        ptIndices[minSubIndex] = __INT_MAX__;
+        // adaptation in case of swapping an element that is already in the top 4 positions
+        for (int j = i+1; j < 4; j++)
+            if (ptIndices[j] == i)
+                ptIndices[j] = ptIndices[i];
+        
+        swapElems(d->X[i], d->X[ptIndices[i]]);
+        swapElems(d->Y[i], d->Y[ptIndices[i]]);
 
         hullSize++;
     }
@@ -288,16 +305,27 @@ static void addPtToHullSimple(Data *d, SuccessorData pt, size_t hullSize, size_t
 {
     swapElems(d->X[pt.node], d->X[hullSize]);
     swapElems(d->Y[pt.node], d->Y[hullSize]);
+    
+    size_t anchor = pt.anchor;
+    if (hullSize == 2) //  need to check on which side the point must be added
+    {
+        double a = (double)d->X[1] - d->X[0];
+        double b = (double)d->Y[0] - d->Y[1];
+        double c = (double)d->X[0] * d->Y[1] - (double)d->X[1] * d->Y[0];
+        double dist = a * d->Y[2] + b * d->X[2] + c;
+        if (dist < 0)
+            anchor = 0;
+    }
 
     float xBak = d->X[hullSize], yBak = d->Y[hullSize];
-    for (size_t i = hullSize-1; i > pt.anchor; i--)
+    for (size_t i = hullSize-1; i > anchor; i--)
     {
         d->X[i+1] = d->X[i];
         d->Y[i+1] = d->Y[i];
     }
 
-    d->X[pt.anchor+1] = xBak;
-    d->Y[pt.anchor+1] = yBak;
+    d->X[anchor+1] = xBak;
+    d->Y[anchor+1] = yBak;
 }
 #endif
 
@@ -423,15 +451,26 @@ static void addPtToHullSmart(Data *d, SuccessorData pt, size_t hullSize, size_t 
     minDists[pt.node-hullSize] = minDists[0];
     minDistAnchors[pt.node-hullSize] = minDistAnchors[0];
 
+    size_t anchor = pt.anchor;
+    if (hullSize == 2) //  need to check on which side the point must be added
+    {
+        double a = (double)d->X[1] - d->X[0];
+        double b = (double)d->Y[0] - d->Y[1];
+        double c = (double)d->X[0] * d->Y[1] - (double)d->X[1] * d->Y[0];
+        double dist = a * d->Y[2] + b * d->X[2] + c;
+        if (dist < 0)
+            anchor = 0;
+    }
+
     float xBak = d->X[hullSize], yBak = d->Y[hullSize];
-    for (size_t i = hullSize-1; i > pt.anchor; i--)
+    for (size_t i = hullSize-1; i > anchor; i--)
     {
         d->X[i+1] = d->X[i];
         d->Y[i+1] = d->Y[i];
     }
 
-    d->X[pt.anchor+1] = xBak;
-    d->Y[pt.anchor+1] = yBak;
+    d->X[anchor+1] = xBak;
+    d->Y[anchor+1] = yBak;
 }
 
 static void adaptMinArrays(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors)
@@ -455,7 +494,6 @@ static void adaptMinArrays(Data *d, SuccessorData pt, size_t hullSize, size_t nU
                 dist1 = sqrtf(dist1 * dist1 + yDiff1 * yDiff1);
                 dist2 = sqrtf(dist2 * dist2 + yDiff2 * yDiff2);
                 minDists[i] = dist1 + dist2 - dist0;
-                //minDistAnchors[i] = j; // not needed
             }
             {
                 float dist0 = d->X[j1] - d->X[j2];
@@ -481,7 +519,7 @@ static void adaptMinArrays(Data *d, SuccessorData pt, size_t hullSize, size_t nU
 }
 
 #ifdef DEBUG
-static bool integrityCheck(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors)
+static bool integrityCheck(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors, ProcThreadIDCombo *id)
 {
     bool quit = false;
     for (size_t i = hullSize; i < hullSize + nUncovered; i++)
@@ -511,21 +549,51 @@ static bool integrityCheck(Data *d, size_t hullSize, size_t nUncovered, float *m
         if ((minDists[i2] != closestDist) && (minDistAnchors[i2] != closestAnchor))
         {
             quit = true;
-            LOG(LOG_LVL_ERROR, "@[%ld] minDists=%.3e instead of %.3e,\t minDistAnchors=%ld instead of %ld", i2, minDists[i2], closestDist, minDistAnchors[i2], closestAnchor);
+            LOG(LOG_LVL_ERROR, "p[%2d] t[%3d] integrityCheck: @[%ld] minDists=%.3e instead of %.3e,\t minDistAnchors=%ld instead of %ld", id->p, id->t, i2, minDists[i2], closestDist, minDistAnchors[i2], closestAnchor);
         }
         else if (minDists[i2] != closestDist)
         {
             quit = true;
-            LOG(LOG_LVL_ERROR, "@[%ld] minDists=%.3e instead of %.3e", i2, minDists[i2], closestDist);
+            LOG(LOG_LVL_ERROR, "p[%2d] t[%3d] integrityCheck: @[%ld] minDists=%.3e instead of %.3e", id->p, id->t, i2, minDists[i2], closestDist);
         }
         else if (minDistAnchors[i2] != closestAnchor)
         {
             quit = true;
-            LOG(LOG_LVL_ERROR, "@[%ld] minDistAnchors=%ld instead of %ld", i2, minDistAnchors[i2], closestAnchor);
+            LOG(LOG_LVL_ERROR, "p[%2d] t[%3d] integrityCheck: @[%ld] minDistAnchors=%ld instead of %ld", id->p, id->t, i2, minDistAnchors[i2], closestAnchor);
         }
     }
     
     return quit;
 }
 #endif
+#endif
+
+#ifdef DEBUG
+static bool hullConvexityCheck(Data *h, size_t hullSize, ProcThreadIDCombo *id)
+{
+    bool retval = false;
+    for (size_t i = 0; i < hullSize; i++)
+    {
+        size_t ip1 = i+1;
+        if (ip1 == hullSize)
+            ip1=0;
+        
+        double a = (double)h->X[ip1] - h->X[i];
+        double b = (double)h->Y[i] - h->Y[ip1];
+        double c = (double)h->X[i] * h->Y[ip1] - (double)h->X[ip1] * h->Y[i];
+
+        for (size_t j = 0; j < hullSize; j++)
+        {
+            if ((j == i) || (j == ip1))
+                continue;
+            double dist = a * h->Y[j] + b * h->X[j] + c;
+            if (dist < 0)
+            {
+                LOG(LOG_LVL_ERROR, "p[%2d] t[%3d] hullConvexityCheck: Hull is not convex. pt[%ld] is not to the left of line between pt[%ld] and pt[%ld]", id->p, id->t, j, i, ip1);
+                retval = true;
+            }
+        }
+    }
+    return retval;
+}
 #endif

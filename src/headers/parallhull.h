@@ -4,11 +4,13 @@
 #define AVX_VEC_SIZE 8
 
 // #define QUICKHULL_STEP_DEBUG // plots data useful for debug at each iteration of the quickhull algorithm
+// #define PARALLHULL_STEP_DEBUG
+// #define PARALLHULL_MERGE_OUTPUT_PLOT
 #define DEBUG
 #define GUI_OUTPUT
-// #define NON_MPI_MODE
+#define NON_MPI_MODE
 
-#define GNUPLOT_RES "1600,900"
+#define GNUPLOT_RES "1920,1080"
 
 #define swapElems(elem1,elem2) { register typeof(elem1) swapVarTemp = elem1; elem1 = elem2; elem2 = swapVarTemp; }
 
@@ -45,6 +47,11 @@ typedef struct
     float *Y;
 } Data;
 
+typedef struct{
+    int p;
+    int t;
+} ProcThreadIDCombo;
+
 void setLogLevel(enum LogLevel lvl);
 void LOG (enum LogLevel lvl, char * line, ...);
 void inlineLOG (enum LogLevel lvl, char * line, ...);
@@ -52,10 +59,17 @@ void throwError (char * line, ...);
 
 Params argParse(int argc, char *argv[]);
 
+#ifdef NON_MPI_MODE
 void readFile(Data *d, Params *p);
+#else
+// returns full number of elements in file
+size_t readFile(Data *d, Params *p, int rank);
+#endif
 
-void plotData(Data *points, Data *hull, int nUncovered, const char * plotPixelSize, const char * title);
+void plotData(Data *points, Data *hull, int nUncovered, const char * title);
 
-size_t quickhull(Data *d, int threadID);
+void plotHullMergeStep(Data *h1, Data *h2, Data *h0, size_t h1Index, size_t h2Index, const char * title, const bool closeH0);
 
-Data parallhullThreaded(Data *d, size_t reducedProblemUB, int nThreads);
+size_t quickhull(Data *d, ProcThreadIDCombo *id);
+
+Data parallhullThreaded(Data *d, size_t reducedProblemUB, int procID, int nThreads);
