@@ -73,7 +73,7 @@ error_t argpParser(int key, char *arg, struct argp_state *state)
             LOG(LOG_LVL_ERROR, "File \"%s\" cannot be accessed or does not exist", arg);
             return ARGP_ERR_UNKNOWN;
         }
-        strncpy(p->inputFile, arg, strlen(arg));
+        strncpy(p->inputFile, arg, 1000);
         break;
 
     case ARGP_NTHREADS:

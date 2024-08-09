@@ -7,14 +7,14 @@ HEADERS_DIR := src/headers/
 # build debug as default
 OBJ_DIR = obj/debug/
 BIN_DIR = bin/debug/
-CFLAGS = -Wall -g -mavx2 -ffast-math -Isrc/headers
+CFLAGS = -Wall -g -mavx2 -mfma -ffast-math -Isrc/headers
 LDFLAGS = -lm
 
 # condition to check value passed
 ifeq ($(MODE),exec)
 OBJ_DIR = obj/exec/
 BIN_DIR = bin/exec/
-CFLAGS = -O3 -ftree-loop-im -ffast-math -mavx2 -march=native -mtune=native -Isrc/headers
+CFLAGS = -O3 -ftree-loop-im -ffast-math -mavx2 -mfma -march=native -mtune=native -Isrc/headers
 endif
 
 SOURCE_NAMES = main.c argParser.c parallhullIO.c quickhull.c parallhull.c

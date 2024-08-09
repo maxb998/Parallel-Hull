@@ -15,6 +15,12 @@
 
 #define MAX_THREADS 256
 
+typedef enum {
+    NPO_CONTINUE,
+    NPO_SWAP
+} NextPtOp;
+
+
 typedef struct {
     Data fullData;
     Data *hulls;
@@ -27,9 +33,8 @@ typedef struct {
 
 static void *parallhullThread(void *arg);
 static Data mergeHulls(Data *h1, Data *h2, ProcThreadIDCombo *id);
-static inline bool findNextMergePoint(Data *mergedH, Data *mainH, Data *altH, size_t *mainHIndex, size_t *altHIndex, ProcThreadIDCombo *id);
+static inline NextPtOp findNextMergePoint(Data *mergedH, Data *mainH, Data *altH, size_t *mainHIndex, size_t *altHIndex, ProcThreadIDCombo *id);
 #ifdef DEBUG
-    static inline bool hullConvexityCheck(Data *h, ProcThreadIDCombo *id);
     static inline bool mergeHullCoverageCheck(Data *h0, Data *h1, Data *h2, ProcThreadIDCombo *id);
 #endif
 
@@ -74,8 +79,8 @@ Data parallhullThreaded(Data *d, size_t reducedProblemUB, int procID, int nThrea
     for (int i = nThreads - 1; i > 0; i--)
     {
         pthread_join(threads[i], NULL);
-        if (hulls[i].X - d->X > d->n)
-            free(hulls[i].X);
+        free(hulls[i].X);
+        free(hulls[i].Y);
     }
     pthread_join(threads[0], NULL); // join outside so that final hull memory alloc is not free
 
@@ -125,14 +130,12 @@ static void *parallhullThread(void *arg)
 
             size_t startPos = avgPartSize * i;
 
-            hulls[i].n = avgPartSize;
-            hulls[i].X = &rd.X[startPos];
-            hulls[i].Y = &rd.Y[startPos];
+            Data pts = { .X=&rd.X[startPos], .Y=&rd.Y[startPos], .n=avgPartSize };
 
             if (i == nParts-1)
-                hulls[i].n = rd.n - avgPartSize * (nParts-1);
+                pts.n = rd.n - avgPartSize * (nParts-1);
 
-            hulls[i].n = quickhull(&hulls[i], &thData->id);
+            hulls[i] = quickhull(&pts, &thData->id);
         }
 
         LOG(LOG_LVL_INFO, "p[%2d] t[%3d] parallhullThread: Quickhull on subproblem/s done, now merging", thData->id.p, thID);
@@ -143,18 +146,26 @@ static void *parallhullThread(void *arg)
             size_t halfNParts = nParts / 2;
             for (size_t i = 0; i < halfNParts; i++)
             {
-                LOG(LOG_LVL_TRACE, "p[%2d] t[%3d] parallhullThread: Merging thread internal hulls %ld and %ld", thData->id.p, thID, i, i + halfNParts);
+                LOG(LOG_LVL_TRACE, "p[%2d] t[%3d] parallhullThread: Merging thread internal hulls %ld(size=%ld) and %ld(size=%ld)", thData->id.p, thID, i, hulls[i].n, i + halfNParts, hulls[i+halfNParts].n);
                 Data h = mergeHulls(&hulls[i], &hulls[i+halfNParts], &thData->id);
 
                 #ifdef DEBUG
-                    hullConvexityCheck(&h, &thData->id);
-                    mergeHullCoverageCheck(&h, &hulls[i], &hulls[i + halfNParts], &thData->id);
+                    if (hullConvexityCheck(&h, &thData->id))
+                    {
+                        plotHullMergeStep(&hulls[i], &hulls[i+halfNParts], &h, 0, 0, "Plot of the error", false);
+                        throwError("p[%2d] t[%3d] parallhullThread: Merged hull is not convex", thData->id.p, thID);
+                    }
+                    if (mergeHullCoverageCheck(&h, &hulls[i], &hulls[i+halfNParts], &thData->id))
+                    {
+                        plotHullMergeStep(&hulls[i], &hulls[i+halfNParts], &h, 0, 0, "Plot of the error", false);
+                        throwError("p[%2d] t[%3d] parallhullThread: Merged Hull does not cover all the points in the hull", thData->id.p, thID);
+                    }
                 #endif
 
-                if (hulls[i].X - rd.X > rd.n) // free memory allocated by mergehulls
-                    free(hulls[i].X);
-                if (hulls[i+halfNParts].X - rd.X > rd.n)
-                    free(hulls[i+halfNParts].X);
+                free(hulls[i].X);
+                free(hulls[i].Y);
+                free(hulls[i+halfNParts].X);
+                free(hulls[i+halfNParts].Y);
                 
                 hulls[i] = h;
             }
@@ -171,11 +182,7 @@ static void *parallhullThread(void *arg)
         free(hulls);
     }
     else
-    {
-        thData->hulls[thID].X = rd.X;
-        thData->hulls[thID].Y = rd.Y;
-        thData->hulls[thID].n = quickhull(&rd, &thData->id);
-    }
+        thData->hulls[thID] = quickhull(&rd, &thData->id);
 
     LOG(LOG_LVL_INFO, "p[%2d] t[%3d] parallhullThread: Thread subproblem solved", thData->id.p, thID);
 
@@ -193,12 +200,21 @@ static void *parallhullThread(void *arg)
         LOG(LOG_LVL_INFO, "p[%2d] t[%3d] parallhullThread: Merging hull with hull in thread %d", thData->id.p, thID, thID2merge);
 
         #ifdef DEBUG
-            hullConvexityCheck(&h, &thData->id);
-            mergeHullCoverageCheck(&h, &thData->hulls[thID], &thData->hulls[thID2merge], &thData->id);
+            if (hullConvexityCheck(&h, &thData->id))
+            {
+                plotHullMergeStep(&thData->hulls[thID], &thData->hulls[thID2merge], &h, 0, 0, "Plot of the error", false);
+                throwError("p[%2d] t[%3d] parallhullThread: Merged hull is not convex", thData->id.p, thID);
+            }
+            if (mergeHullCoverageCheck(&h, &thData->hulls[thID], &thData->hulls[thID2merge], &thData->id))
+            {
+                plotHullMergeStep(&thData->hulls[thID], &thData->hulls[thID2merge], &h, 0, 0, "Plot of the error", false);
+                throwError("p[%2d] t[%3d] parallhullThread: Merged Hull does not cover all the points in the hull", thData->id.p, thID);
+            }
         #endif
 
-        if (thData->hulls[thID].X - thData->fullData.X > thData->fullData.n)
-            free(thData->hulls[thID].X);
+        // each thread manages to free its own memory
+        free(thData->hulls[thID].X);
+        free(thData->hulls[thID].Y);
         
         thData->hulls[thID] = h;
 
@@ -216,173 +232,132 @@ static void *parallhullThread(void *arg)
 
 static Data mergeHulls(Data *h1, Data *h2, ProcThreadIDCombo *id)
 {
-    size_t h1Index = 0, h2Index = 0;
-
     Data h0;
-    h0.n = 1;
-    h0.X = malloc((h1->n + h2->n) * 2 * sizeof(float));
-    if (h0.X == NULL)
+    h0.n = 0;
+    h0.X = malloc((h1->n + h2->n) * sizeof(float) + MALLOC_PADDING);
+    h0.Y = malloc((h1->n + h2->n) * sizeof(float) + MALLOC_PADDING);
+    if ((h0.X == NULL) || (h0.Y == NULL))
         throwError("p[%2d] t[%3d] mergeHulls: Failed to allocate memory for merged hull", id->p, id->t);
-    h0.Y = &h0.X[h1->n + h2->n];
 
-    bool mainHullIsH1, h1IsFirstMain;
+    Data *mainH, *altH;
+    size_t mainHIndex = 0, altHindex = 0;
 
-    {   // set first point of h0 as the lowest one
+    // set an additional point at the end of h1 and h2 to avoid errors(memory space available in padding)
+    h1->X[h1->n+1] = h1->X[1];
+    h1->Y[h1->n+1] = h1->Y[1];
+    h2->X[h2->n+1] = h2->X[1];
+    h2->Y[h2->n+1] = h2->Y[1];
+    h0.X[0] = NAN; h0.Y[0] = NAN; // needed for first loop iter
+
+    {
     if (h1->Y[0] < h2->Y[0])
     {
-        h0.X[0] = h1->X[0];
-        h0.Y[0] = h1->Y[0];
-        h1Index = 1;
-        mainHullIsH1 = true;
+        mainH = h1;
+        altH = h2;
     }
     else if (h1->Y[0] > h2->Y[0])
     {
-        h0.X[0] = h2->X[0];
-        h0.Y[0] = h2->Y[0];
-        h2Index = 1;
-        mainHullIsH1 = false;
+        mainH = h2;
+        altH = h1;
     }
     else if (h1->X[0] >= h2->X[0]) // last two cases are here in case of equality (look at the X coordinate and choose the rightmost) (likely a rare occurence)
     {
-        h0.X[0] = h1->X[0];
-        h0.Y[0] = h1->Y[0];
-        h1Index = 1;
-        mainHullIsH1 = true;
+        mainH = h1;
+        altH = h2;
     }
     else
     {
-        h0.X[0] = h2->X[0];
-        h0.Y[0] = h2->Y[0];
-        h2Index = 1;
-        mainHullIsH1 = false;
+        mainH = h2;
+        altH = h1;
     }
-    h1IsFirstMain = mainHullIsH1;
     }
 
-    //################## Merge Procedure ##########################
-
-    while ((h1Index <= h1->n) || (h2Index <= h2->n))
+    //NextPtOp npo = NPO_CONTINUE;
+    while ((mainHIndex < mainH->n) || ((mainHIndex <= mainH->n) && ((h0.X[h0.n-1] != h0.X[0]) || (h0.Y[h0.n-1] != h0.Y[0]))))
     {
+        #ifdef DEBUG
+            if (mainHIndex > mainH->n)
+            {
+                plotHullMergeStep(mainH, altH, &h0, mainHIndex, altHindex, "Plot of the error", false);
+                throwError("p[%2d] t[%3d] mergeHull: Cannot add points from an hull that has already been read completely. mainHIndex=%ld, mainH.n=%ld, altHIndex=%ld, altH.n=%ld, h0.n=%ld", id->p, id->t, mainHIndex, mainH->n, altHindex, altH->n, h0.n);
+            }
+            // if (hullConvexityCheck(&h0, id))
+            // {
+            //     plotHullMergeStep(mainH, altH, &h0, mainHIndex, altHindex, "Plot of the error", false);
+            //     throwError("p[%2d] t[%3d] mergeHull: Merged hull is not convex. mainHIndex=%ld, mainH.n=%ld, altHIndex=%ld, altH.n=%ld, h0.n=%ld", id->p, id->t, mainHIndex, mainH->n, altHindex, altH->n, h0.n);
+            // }
+        #endif
+
         #ifdef PARALLHULL_STEP_DEBUG
             // show partial hull with gnuplot at each iteration and wait for user input to resume
             char plotTitle[200];
-            sprintf(plotTitle, "Merged Hull: size=%lu, h1.n=%ld, h2.n=%ld, h1Index=%ld, h2Index=%ld", h0.n, h1->n, h2->n, h1Index, h2Index);
+            sprintf(plotTitle, "Merged Hull: h0.n=%lu, mainH.n=%ld, altH.n=%ld, mainHIndex=%ld, altHIndex=%ld", h0.n, mainH->n, altH->n, mainHIndex, altHindex);
             LOG(LOG_LVL_DEBUG, "%s", plotTitle);
-            plotHullMergeStep(h1, h2, &h0, h1Index, h2Index, plotTitle, false);
+            plotHullMergeStep(mainH, altH, &h0, mainHIndex, altHindex, plotTitle, false);
             getchar();
         #endif
 
-        if (mainHullIsH1)
-        {
-            if (findNextMergePoint(&h0, h1, h2, &h1Index, &h2Index, id))
-                mainHullIsH1 = ! mainHullIsH1;
-        }
-        else
-        {
-            if (findNextMergePoint(&h0, h2, h1, &h2Index, &h1Index, id))
-                mainHullIsH1 = !mainHullIsH1;
-        }
-
-        #ifdef DEBUG
-            if (mainHullIsH1 && (h1Index >= h1->n+1))
-            {
-                plotHullMergeStep(h1, h2, &h0, h1Index, h2Index, "Plot of the error", false);
-                throwError("p[%2d] t[%3d] mergeHull: Cannot add points from an hull that has already been read completely. h1Index=%ld, h1Size=%ld, h2Index=%ld, h2Size=%ld, h0Size=%ld, h1IsMain=%d", id->p, id->t, h1Index, h1->n, h2Index, h2->n, h0.n, mainHullIsH1);
-            }
-            if (!mainHullIsH1 && (h2Index >= h2->n+1))
-            {
-                plotHullMergeStep(h1, h2, &h0, h1Index, h2Index, "Plot of the error", false);
-                throwError("p[%2d] t[%3d] mergeHull: Cannot add points from an hull that has already been read completely. h1Index=%ld, h1Size=%ld, h2Index=%ld, h2Size=%ld, h0Size=%ld, h1IsMain=%d", id->p, id->t, h1Index, h1->n, h2Index, h2->n, h0.n, mainHullIsH1);
-            }
-        #endif
-
-        if (mainHullIsH1)
-        {
-            size_t swapIndex = h1Index;
-            if (h1Index > h1->n) break;
-            if (h1Index == h1->n)
-            { 
-                if (!h1IsFirstMain) swapIndex = 0; 
-                else break;
-            }
-            h0.X[h0.n] = h1->X[swapIndex];
-            h0.Y[h0.n] = h1->Y[swapIndex];
-            h1Index++;
-        }
-        else
-        {
-            size_t swapIndex = h2Index;
-            if (h2Index > h2->n) break;
-            if (h2Index == h2->n)
-            { 
-                if (h1IsFirstMain) swapIndex = 0; 
-                else break;
-            }
-            h0.X[h0.n] = h2->X[swapIndex];
-            h0.Y[h0.n] = h2->Y[swapIndex];
-            h2Index++;
-        }
+        // add pt
+        h0.X[h0.n] = mainH->X[mainHIndex];
+        h0.Y[h0.n] = mainH->Y[mainHIndex];
         h0.n++;
+        mainHIndex++;
+
+        NextPtOp npo = findNextMergePoint(&h0, mainH, altH, &mainHIndex, &altHindex, id);
+
+        if (npo == NPO_SWAP)
+        {
+            swapElems(mainH, altH)
+            swapElems(mainHIndex, altHindex)
+        }
     }
-    
-    #ifdef PARALLHULL_MERGE_OUTPUT_PLOT
-        // show partial hull with gnuplot at each iteration and wait for user input to resume
-        char plotTitle[200];
-        sprintf(plotTitle, "Merged Hull: size=%lu, h1.n=%ld, h2.n=%ld", h0.n, h1->n, h2->n);
-        LOG(LOG_LVL_DEBUG, "%s", plotTitle);
-        plotHullMergeStep(h1, h2, &h0, h1Index, h2Index, plotTitle, true);
-        getchar();
-    #endif
+    h0.n--;
+
+    h0.X = realloc(h0.X, (h0.n + 1) * sizeof(float) + MALLOC_PADDING);
+    h0.Y = realloc(h0.Y, (h0.n + 1) * sizeof(float) + MALLOC_PADDING);
 
     return h0;
 }
 
-static inline bool findNextMergePoint(Data *mergedH, Data *mainH, Data *altH, size_t *mainHIndex, size_t *altHIndex, ProcThreadIDCombo *id)
+static inline NextPtOp findNextMergePoint(Data *mergedH, Data *mainH, Data *altH, size_t *mainHIndex, size_t *altHIndex, ProcThreadIDCombo *id)
 {
     #ifdef DEBUG
         if (*mainHIndex > mainH->n+1)
             throwError("p[%2d] t[%3d] findNextMergePoint: mainHIndex > mainH.n", id->p, id->t);
         if (*altHIndex > altH->n+1)
             throwError("p[%2d] t[%3d] findNextMergePoint: altHIndex > altH.n", id->p, id->t);
-        // if ((*mainHIndex == mainH->n) && (*altHIndex == altH->n))
-        //     throwError("findNextMergePoint: mainHIndex == mainH->n && altHIndex == altH->n");
     #endif
 
-    bool swapMainToAlt=false;
+    if (*altHIndex > altH->n)
+        return NPO_CONTINUE;
 
-    if (*altHIndex > altH->n+1)
-        return false;
-
+    NextPtOp retval = NPO_CONTINUE;
     size_t lastIndex = mergedH->n - 1;
-
     {
-        size_t mainHIndexFix = *mainHIndex < mainH->n ? *mainHIndex : *mainHIndex % mainH->n;
         double a,b,c;
-        a = (double)mainH->X[mainHIndexFix] - mergedH->X[lastIndex];
-        b = (double)mergedH->Y[lastIndex] - mainH->Y[mainHIndexFix];
-        c = (double)mergedH->X[lastIndex] * mainH->Y[mainHIndexFix] - (double)mainH->X[mainHIndexFix] * mergedH->Y[lastIndex];
+        a = (double)mainH->X[*mainHIndex] - mergedH->X[lastIndex];
+        b = (double)mergedH->Y[lastIndex] - mainH->Y[*mainHIndex];
+        c = (double)mergedH->X[lastIndex] * mainH->Y[*mainHIndex] - (double)mainH->X[*mainHIndex] * mergedH->Y[lastIndex];
         
         // now find min dist point starting from 
         double previousDist = INFINITY;
-        size_t altHIndexFixed = *altHIndex < altH->n ? *altHIndex : *altHIndex % altH->n;
-        double currentDist = a * altH->Y[altHIndexFixed] + b * altH->X[altHIndexFixed] + c;
+        double currentDist = a * altH->Y[*altHIndex] + b * altH->X[*altHIndex] + c;
 
-        while ((previousDist >= currentDist) && (*altHIndex <= altH->n) && (currentDist >= 0)) // while distance is decreasing and we are not looking through already looked data
+        while ((previousDist >= currentDist) && (*altHIndex < altH->n) && (currentDist >= 0)) // while distance is decreasing and we are not looking through already looked data
         {
             (*altHIndex)++;
-            altHIndexFixed = *altHIndex < altH->n ? *altHIndex : *altHIndex % altH->n;
             previousDist = currentDist;
-            currentDist = a * altH->Y[altHIndexFixed] + b * altH->X[altHIndexFixed] + c;
+            currentDist = a * altH->Y[*altHIndex] + b * altH->X[*altHIndex] + c;
         }
 
         if (currentDist < 0)
-            swapMainToAlt = true;
-        else 
+            retval = NPO_SWAP;
+        else // (previousDist >= currentDist) || (*altHIndex <= altH->n)
             (*altHIndex)--;
     }
 
     // need to check if point in altH[altHIndex] is the correct one for the chosen hull or not. It might not belong to the convex hull and be covered by the line casted a successive point in the hull
-    if ((swapMainToAlt) && (*altHIndex < altH->n))
+    if (retval == NPO_SWAP)
     {
         while (*altHIndex < altH->n)
         {
@@ -392,47 +367,18 @@ static inline bool findNextMergePoint(Data *mergedH, Data *mainH, Data *altH, si
             c = (double)mergedH->X[lastIndex] * altH->Y[*altHIndex] - (double)altH->X[*altHIndex] * mergedH->Y[lastIndex];
 
             size_t altHIndexP1 = *altHIndex + 1;
-            if (altHIndexP1 >= altH->n)
-                altHIndexP1 = 0;
             double dist = a * altH->Y[altHIndexP1] + b * altH->X[altHIndexP1] + c;
 
             if (dist > 0) break; // ignore dist == 0 since it is on the same line just get the point farther
             
-            (*altHIndex)++;
+            (*altHIndex) = altHIndexP1;
         }
     }
 
-    return swapMainToAlt;
+    return retval;
 }
 
 #ifdef DEBUG
-static inline bool hullConvexityCheck(Data *h, ProcThreadIDCombo *id)
-{
-    bool retval = false;
-    for (size_t i = 0; i < h->n; i++)
-    {
-        size_t ip1 = i+1;
-        if (ip1 == h->n)
-            ip1=0;
-        
-        double a = (double)h->X[ip1] - h->X[i];
-        double b = (double)h->Y[i] - h->Y[ip1];
-        double c = (double)h->X[i] * h->Y[ip1] - (double)h->X[ip1] * h->Y[i];
-
-        for (size_t j = 0; j < h->n; j++)
-        {
-            if ((j == i) || (j == ip1))
-                continue;
-            double dist = a * h->Y[j] + b * h->X[j] + c;
-            if (dist < 0)
-            {
-                LOG(LOG_LVL_ERROR, "p[%2d] t[%3d] hullConvexityCheck: Merged Hull is not convex. pt[%ld] is not to the left of line between pt[%ld] and pt[%ld]", id->p, id->t, j, i, ip1);
-                retval = true;
-            }
-        }
-    }
-    return retval;
-}
 static inline bool mergeHullCoverageCheck(Data *h0, Data *h1, Data *h2, ProcThreadIDCombo *id)
 {
     bool retval = false;
@@ -448,19 +394,20 @@ static inline bool mergeHullCoverageCheck(Data *h0, Data *h1, Data *h2, ProcThre
 
         for (size_t j = 0; j < h1->n; j++)
         {
-            if (((h1->X[j] != h0->X[i]) && (h1->Y[j] != h0->Y[i])) ||
-                ((h1->X[j] != h0->X[ip1]) && (h1->X[j] != h0->Y[ip1])))
+            if (((h1->X[j] == h0->X[i]) && (h1->Y[j] == h0->Y[i])) ||
+                ((h1->X[j] == h0->X[ip1]) && (h1->Y[j] == h0->Y[ip1])))
                 continue;
             double dist = a * h1->Y[j] + b * h1->X[j] + c;
             if (dist < 0)
             {
                 LOG(LOG_LVL_ERROR, "p[%2d] t[%3d] mergeHullCoverageCheck: Merged Hull does not contain point[%ld] of h1. It is not to the right of line between pt[%ld] and pt[%ld]", id->p, id->t, j, i, ip1);
+                retval = true;
             }
         }
         for (size_t j = 0; j < h2->n; j++)
         {
-            if (((h2->X[j] != h0->X[i]) && (h2->Y[j] != h0->Y[i])) ||
-                ((h2->X[j] != h0->X[ip1]) && (h2->X[j] != h0->Y[ip1])))
+            if (((h2->X[j] == h0->X[i]) && (h2->Y[j] == h0->Y[i])) ||
+                ((h2->X[j] == h0->X[ip1]) && (h2->Y[j] == h0->Y[ip1])))
                 continue;
             double dist = a * h2->Y[j] + b * h2->X[j] + c;
             if (dist < 0)

@@ -97,7 +97,7 @@ void readFile(Data *d, Params *p)
     d->n = ftell(fileptr) / (2 * sizeof(float));
     rewind(fileptr);
 
-    d->X = malloc(d->n * 2 * sizeof(float));
+    d->X = malloc(d->n * 2 * sizeof(float) + MALLOC_PADDING);
     if (d->X == NULL)
         throwError("Failed to allocate memory for points");
     d->Y = &d->X[d->n];
@@ -122,7 +122,7 @@ size_t readFile(Data *d, Params *p, int rank)
     if (rank == p->nProcs-1)
         d->n = n - stdReducedSize * (p->nProcs-1);
 
-    d->X = malloc(d->n * 2 * sizeof(float));
+    d->X = malloc(d->n * 2 * sizeof(float) + MALLOC_PADDING);
     if (d->X == NULL)
         throwError("readFile: Failed to allocate memory for points");
     d->Y = &d->X[d->n];
@@ -161,15 +161,14 @@ void plotData(Data *points, Data *hull, int nUncovered, const char * title)
     fprintf(gnuplotPipe, "set style line 4 linecolor rgb '%s' pointsize 0\n", "black");
 
     // populating the plot
-    
     fprintf(gnuplotPipe, "plot '-' with point linestyle 1, '-' with point linestyle 2, '-' with point linestyle 3, '-' with linespoint linestyle 4\n");
 
     // first plot only the points
-    for (int i = hull->n + nUncovered; i < points->n; i++)
+    for (int i = nUncovered; i < points->n; i++)
         fprintf(gnuplotPipe, "%f %f\n", points->X[i], points->Y[i]);
     fprintf(gnuplotPipe, "e\n");
 
-    for (int i = hull->n; i < hull->n + nUncovered; i++)
+    for (int i = 0; i < nUncovered; i++)
         fprintf(gnuplotPipe, "%f %f\n", points->X[i], points->Y[i]);
     fprintf(gnuplotPipe, "e\n");
 
@@ -232,4 +231,17 @@ void plotHullMergeStep(Data *h1, Data *h2, Data *h0, size_t h1Index, size_t h2In
 
     // close stream
     pclose(gnuplotPipe);
+}
+
+void saveHullPointsTxt(Data *hull, char *fname)
+{
+    FILE *fileptr = fopen(fname, "w");
+
+    for (size_t i = 0; i < hull->n; i++)
+    {
+        fprintf(fileptr, "%f,%f\n", hull->X[i], hull->Y[i]);
+    }
+    
+
+    fclose(fileptr);
 }

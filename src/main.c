@@ -35,13 +35,34 @@ int main (int argc, char *argv[])
     Data hull = parallhullThreaded(&d, -1, 0, p.nThreads);
     clock_gettime(_POSIX_MONOTONIC_CLOCK, &timeStruct);
     quickhullTime = cvtTimespec2Double(timeStruct);
+
     LOG(LOG_LVL_NOTICE, "Parallhull finished in %lfs", quickhullTime - fileReadTime);
     LOG(LOG_LVL_INFO, "Final Hull size = %ld", hull.n);
+
+    #ifdef DEBUG
+        // check hull for duplicates before common errors
+        for (size_t i = 0; i < hull.n; i++)
+            for (size_t j = i+1; j < hull.n; j++)
+                if ((hull.X[i] == hull.X[j]) && (hull.Y[i] == hull.Y[j]))
+                    LOG(LOG_LVL_ERROR, "Final Hull contains a duplicate at position %ld and %ld", i , j);
+        
+
+        ProcThreadIDCombo fakeID = { .p=0, .t=0 };
+        if (hullConvexityCheck(&hull, &fakeID))
+            throwError("Final Hull is not convex");
+        free(d.X);
+        d.n = 0; d.X = NULL; d.Y = NULL;
+        readFile(&d, &p);
+        if (finalCoverageCheck(&hull, &d, &fakeID))
+            throwError("Final Hull does not cover all points");
+    #endif
 
     #ifdef GUI_OUTPUT
         if (d.n < 200000)
             plotData(&d, &hull, 0, "Complete Hull");
     #endif
+
+    // saveHullPointsTxt(&hull, "hullPts.txt");
 
     free(d.X);
     d.X = NULL; d.Y = NULL;

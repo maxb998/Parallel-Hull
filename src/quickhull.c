@@ -1,44 +1,28 @@
 #include "parallhull.h"
 
-#define SMARTMODE
-
 #include <math.h>
+#include <immintrin.h>
 #ifdef NON_MPI_MODE
     #include <time.h>
     #include <stdio.h>
     #include <unistd.h> // needed to get the _POSIX_MONOTONIC_CLOCK and measure time
 #endif
 
-typedef struct 
-{
-    size_t node;
-    size_t anchor;
-} SuccessorData;
+#define USE_MANUAL_AVX_PIPELINE_OPTIMIZATION // without this takes removeCoveredPoints takes more than triple the time
 
-static void getExtremeCoordsPts(Data *d, size_t ptIndices[4]);
-static size_t setExtremeCoordsAsInit(Data *d, size_t ptIndices[4]);
-static size_t removeCoveredPointsSimple(Data *d, size_t hullSize, size_t nUncovered);
-#ifndef SMARTMODE
-    static SuccessorData findFarthestPtSimple(Data *d, size_t hullSize, size_t nUncovered);
-    static void addPtToHullSimple(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered);
-#else
-    static size_t removeCoveredPointsSmart(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
-    static void setupMaxDistArrays(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
-    static SuccessorData findFarthestPtSmart(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
-    static void addPtToHullSmart(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
-    static void adaptMinArrays(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors);
-    #ifdef DEBUG
-        static bool integrityCheck(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors, ProcThreadIDCombo *id);
-    #endif
-#endif
-#ifdef DEBUG
-    static bool hullConvexityCheck(Data *h, size_t hullSize, ProcThreadIDCombo *id);
-#endif
+#define HULL_ALLOC_ELEMS 1000
 
-size_t quickhull(Data *d, ProcThreadIDCombo *id)
+
+static void getExtremeCoordsPts(Data *pts, size_t ptIndices[4]);
+static void extremeCoordsInit(Data *hull, Data *uncoveredPts, size_t ptIndices[4]);
+static void removeCoveredPoints(Data *hull, Data *uncoveredPts, char *uncoveredCache, ProcThreadIDCombo *id);
+static void findFarthestPts(Data *hull, Data *uncoveredPts, size_t *maxDistPtIndices);
+static void addPtsToHull(Data *hull, Data *uncoveredPts, size_t **maxDistPtIndicesPtr, size_t **offsetCounterPtr, size_t *allocatedElemsCount, ProcThreadIDCombo *id);
+
+Data quickhull (Data *d, ProcThreadIDCombo *id)
 {
     double startTime, iterTime, previousIterTime;
-    int iterCount = 0, shiftAmount = -1;
+    int iterCount = 0;
 
     #ifdef NON_MPI_MODE
         struct timespec timeStruct;
@@ -49,26 +33,36 @@ size_t quickhull(Data *d, ProcThreadIDCombo *id)
     #else
     #endif
 
+    Data hull, uncoveredPts;
+    uncoveredPts = *d;
+
+    hull.n = 0;
+    size_t allocatedElemsCount = HULL_ALLOC_ELEMS < uncoveredPts.n ? HULL_ALLOC_ELEMS+1 : uncoveredPts.n+1;
+    hull.X = malloc(allocatedElemsCount * sizeof(float) + MALLOC_PADDING);
+    if (hull.X == NULL)
+        throwError("p[%2d] t[%3d] extremeCoordsInit: Failed to allocate initial memory for the hull coordinates", id->p, id->t);
+    hull.Y = malloc(allocatedElemsCount * sizeof(float) + MALLOC_PADDING);
+    if (hull.Y == NULL)
+        throwError("p[%2d] t[%3d] extremeCoordsInit: Failed to allocate initial memory for the hull coordinates", id->p, id->t);
+    size_t *offsetCounter = malloc(allocatedElemsCount * 2 * sizeof(size_t) + MALLOC_PADDING*2);
+    if (offsetCounter == NULL)
+        throwError("p[%2d] t[%3d] quickhull: Failed to allocate memory", id->p, id->t);
+    size_t *maxDistPtIndices = &offsetCounter[allocatedElemsCount];
+
     // init
     size_t ptIndices[4];
     getExtremeCoordsPts(d, ptIndices);
-    size_t hullSize = setExtremeCoordsAsInit(d, ptIndices);
+    extremeCoordsInit(&hull, &uncoveredPts, ptIndices);
     
-    size_t nUncovered = d->n - hullSize;
-    nUncovered = removeCoveredPointsSimple(d, hullSize, nUncovered);
-
-    #ifdef SMARTMODE
-        float *minDistsAllocPtr = malloc(nUncovered * (sizeof(float) + sizeof(size_t)));
-        if (minDistsAllocPtr == NULL)
-            throwError("Could not allocate %lu bytes of memory for the minDists structures", nUncovered * sizeof(float) + nUncovered + sizeof(size_t));
-            
-        float *minDists = minDistsAllocPtr;
-        size_t *minDistAnchors = (size_t*)(&minDists[nUncovered]);
-        setupMaxDistArrays(d, hullSize, nUncovered, minDists, minDistAnchors);
-    #endif
-
-    while (nUncovered > 0)
+    while (uncoveredPts.n > 0)
     {
+        if (allocatedElemsCount * sizeof(size_t) * 2 >= uncoveredPts.n)
+            removeCoveredPoints(&hull, &uncoveredPts, (char*)offsetCounter, id);
+        else
+            removeCoveredPoints(&hull, &uncoveredPts, NULL, id);
+        
+        if (uncoveredPts.n == 0) break;
+
         iterCount++;   
         #ifdef NON_MPI_MODE 
             previousIterTime = iterTime;
@@ -76,96 +70,74 @@ size_t quickhull(Data *d, ProcThreadIDCombo *id)
             iterTime = cvtTimespec2Double(timeStruct);
         #endif
 
-        inlineLOG(LOG_LVL_TRACE, "p[%2d] t[%3d] quickhull: Iteration %5d took %.3es. nUncovered=%.3e, hullSize=%ld", id->p, id->t, iterCount, iterTime-previousIterTime, (float)nUncovered, hullSize);
-        if ((iterCount >> shiftAmount) || (iterCount < 3))
-        {
-            LOG(LOG_LVL_TRACE, "p[%2d] t[%3d] quickhull: Iteration %5d completed after %.3es from begining. nUncovered=%.3e, hullSize=%ld", id->p, id->t, iterCount, iterTime-startTime, (float)nUncovered, hullSize);
-            shiftAmount++;
-        }
+        LOG(LOG_LVL_TRACE, "p[%2d] t[%3d] quickhull: Iteration %5d lasted %.3es, %.3es from the begining. nUncovered=%.3e, hullSize=%ld", id->p, id->t, iterCount, iterTime-previousIterTime, iterTime-startTime, (float)uncoveredPts.n, hull.n);
         
-        #if defined(QUICKHULL_STEP_DEBUG) && defined(NON_MPI_MODE)
+        #ifdef QUICKHULL_STEP_DEBUG
             // show partial hull with gnuplot at each iteration and wait for user input to resume
             char plotTitle[200];
-            sprintf(plotTitle, "Partial Hull: size=%lu, uncovered=%lu", hullSize, nUncovered);
-            Data hull = { .n=hullSize, .X=d->X, .Y=d->Y };
-            plotData(d, &hull, nUncovered, plotTitle);
+            sprintf(plotTitle, "p[%2d] t[%3d] Partial Hull: size=%lu, uncovered=%lu", id->p, id->t, hull.n, uncoveredPts.n);
+            plotData(d, &hull, uncoveredPts.n, plotTitle);
             getchar();
         #endif
 
-        #ifndef SMARTMODE
-            SuccessorData s = findFarthestPtSimple(d, hullSize, nUncovered);
-            addPtToHullSimple(d, s, hullSize, nUncovered);
-            hullSize++;
-            nUncovered--;
-            nUncovered = removeCoveredPointsSimple(d, hullSize, nUncovered);
-        #else
-            SuccessorData s = findFarthestPtSmart(d, hullSize, nUncovered, minDists, minDistAnchors);
-            addPtToHullSmart(d, s, hullSize, nUncovered, minDists, minDistAnchors);
-            minDists++; minDistAnchors++;
-            hullSize++;
-            #ifdef DEBUG
-                size_t oldNUncovered = nUncovered;
-            #endif
-
-            nUncovered--;
-            nUncovered = removeCoveredPointsSmart(d, hullSize, nUncovered, minDists, minDistAnchors);
-            if (hullSize <= 3)
-                setupMaxDistArrays(d, hullSize, nUncovered, minDists, minDistAnchors);
-            else
-                adaptMinArrays(d, s, hullSize, nUncovered, minDists, minDistAnchors);
-            #ifdef DEBUG
-                if (integrityCheck(d, hullSize, nUncovered, minDists, minDistAnchors, id))
-                    throwError("p[%2d] t[%3d] quickhull: Error detected in values inside minDist* arrays. n=%ld, hullSize=%ld, nUncovered=%ld, oldNUncovered=%ld, s.node=%ld, s.anchor=%ld", id->p, id->t, d->n, hullSize, nUncovered, oldNUncovered, s.node, s.anchor);
-            #endif
+        findFarthestPts(&hull, &uncoveredPts, maxDistPtIndices);
+        #ifdef DEBUG
+            size_t oldNUncovered = uncoveredPts.n;
         #endif
 
-        #ifdef DEBUG
-            if (hullConvexityCheck(d, hullSize, id))
-                throwError("p[%2d] t[%3d] quickhull: Hull is not convex. n=%ld, hullSize=%ld, nUncovered=%ld, oldNUncovered=%ld, s.node=%ld, s.anchor=%ld", id->p, id->t, d->n, hullSize, nUncovered, oldNUncovered, s.node, s.anchor);
+        addPtsToHull(&hull, &uncoveredPts, &maxDistPtIndices, &offsetCounter, &allocatedElemsCount, id);
 
+        #ifdef DEBUG
+            if (hullConvexityCheck(&hull, id))
+                throwError("p[%2d] t[%3d] quickhull: Hull is not convex. n=%ld, hullSize=%ld, nUncovered=%ld, oldNUncovered=%ld", id->p, id->t, d->n, hull.n, uncoveredPts.n, oldNUncovered);
         #endif
     }
 
-    LOG(LOG_LVL_TRACE, "p[%2d] t[%3d] quickhull: Iteration %5d took %.3es. nUncovered=%.3e, hullSize=%ld", id->p, id->t, iterCount, iterTime-previousIterTime, (float)nUncovered, hullSize);
+    #ifdef QUICKHULL_STEP_DEBUG
+        // show partial hull with gnuplot at each iteration and wait for user input to resume
+        char plotTitle[200];
+        sprintf(plotTitle, "p[%2d] t[%3d] quickhull: size=%lu, uncovered=%lu", id->p, id->t, hull.n, uncoveredPts.n);
+        plotData(d, &hull, uncoveredPts.n, plotTitle);
+        getchar();
+    #endif
 
     #ifdef DEBUG
         LOG(LOG_LVL_DEBUG, "p[%2d] t[%3d] quickhull: DEBUG macro is defined! Now checking whether all points are actually inside the hull", id->p, id->t);
-        nUncovered = d->n - hullSize;
-        nUncovered = removeCoveredPointsSimple(d, hullSize, nUncovered);
-        if (nUncovered != 0)
-            throwError("p[%2d] t[%3d] quickhull: There are still %ld points that are not inside the hull", id->p, id->t, nUncovered);
+        if (finalCoverageCheck(&hull, d, id) != 0)
+            throwError("p[%2d] t[%3d] quickhull: There are still %ld points that are not inside the hull", id->p, id->t, uncoveredPts.n);
     #endif
 
-    #ifdef SMARTMODE
-        free(minDistsAllocPtr);
-    #endif
-    return hullSize;
+    free(offsetCounter);
+    hull.X = realloc(hull.X, (hull.n+1) * sizeof(float) + MALLOC_PADDING);
+    hull.Y = realloc(hull.Y, (hull.n+1) * sizeof(float) + MALLOC_PADDING);
+
+    return hull;
 }
 
-static void getExtremeCoordsPts(Data *d, size_t ptIndices[4])
+static void getExtremeCoordsPts(Data *pts, size_t ptIndices[4])
 {
     for (int i = 0; i < 4; i++)
         ptIndices[i] = 0;
     
-    for (size_t i = 1; i < d->n; i++)
+    for (size_t i = 1; i < pts->n; i++)
     {
-        if  ((d->X[i] > d->X[ptIndices[1]]) || 
-            ((d->X[i] == d->X[ptIndices[1]]) && (d->Y[i] > d->Y[ptIndices[1]]))) //xMax rightmust upward if multiple choices
+        if  ((pts->X[i] > pts->X[ptIndices[1]]) || 
+            ((pts->X[i] == pts->X[ptIndices[1]]) && (pts->Y[i] > pts->Y[ptIndices[1]]))) //xMax rightmust upward if multiple choices
             ptIndices[1] = i;
-        else if ((d->X[i] < d->X[ptIndices[3]]) || 
-                ((d->X[i] == d->X[ptIndices[3]]) && (d->Y[i] < d->Y[ptIndices[3]]))) //xMin leftmost loward if multiple choices
+        else if ((pts->X[i] < pts->X[ptIndices[3]]) || 
+                ((pts->X[i] == pts->X[ptIndices[3]]) && (pts->Y[i] < pts->Y[ptIndices[3]]))) //xMin leftmost loward if multiple choices
             ptIndices[3] = i;
 
-        if ((d->Y[i] > d->Y[ptIndices[2]]) || 
-            ((d->Y[i] == d->Y[ptIndices[2]]) && (d->X[i] < d->X[ptIndices[2]]))) //yMax upmost leftward if multiple choices
+        if ((pts->Y[i] > pts->Y[ptIndices[2]]) || 
+            ((pts->Y[i] == pts->Y[ptIndices[2]]) && (pts->X[i] < pts->X[ptIndices[2]]))) //yMax upmost leftward if multiple choices
             ptIndices[2] = i;
-        else if ((d->Y[i] < d->Y[ptIndices[0]]) || 
-                ((d->Y[i] == d->Y[ptIndices[0]]) && (d->X[i] > d->X[ptIndices[0]]))) //yMin lowmost rightward if multiple choices
+        else if ((pts->Y[i] < pts->Y[ptIndices[0]]) || 
+                ((pts->Y[i] == pts->Y[ptIndices[0]]) && (pts->X[i] > pts->X[ptIndices[0]]))) //yMin lowmost rightward if multiple choices
             ptIndices[0] = i;
     }
 }
 
-static size_t setExtremeCoordsAsInit(Data *d, size_t ptIndices[4])
+static void extremeCoordsInit(Data *hull, Data *uncoveredPts, size_t ptIndices[4])
 {    
     // check extreme coords for duplicates
     for (int i = 0; i < 3; i++)
@@ -183,417 +155,385 @@ static size_t setExtremeCoordsAsInit(Data *d, size_t ptIndices[4])
         }
     }
     
-    size_t hullSize = 0;
     for (int i = 0; (i < 4) && (ptIndices[i] != -1); i++)
     {
-        // adaptation in case of swapping an element that is already in the top 4 positions
-        for (int j = i+1; j < 4; j++)
-            if (ptIndices[j] == i)
-                ptIndices[j] = ptIndices[i];
-        
-        swapElems(d->X[i], d->X[ptIndices[i]]);
-        swapElems(d->Y[i], d->Y[ptIndices[i]]);
-
-        hullSize++;
+        hull->X[i] = uncoveredPts->X[ptIndices[i]];
+        hull->Y[i] = uncoveredPts->Y[ptIndices[i]];
+        hull->n++;
     }
+    hull->X[hull->n] = hull->X[0];
+    hull->Y[hull->n] = hull->Y[0];
 
-    return hullSize;
-}
-
-static size_t removeCoveredPointsSimple(Data *d, size_t hullSize, size_t nUncovered)
-{
-    size_t i = hullSize;
-    size_t j = nUncovered + hullSize - 1; // position of last covered element in d->X and d->Y
-    while (i <= j)
-    {
-        bool iIsCovered = true;
-        for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
-        {
-            if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] < d->Y[i]))
-            {
-                double a = (double)d->X[k1] - d->X[k2];
-                double b = (double)d->Y[k2] - d->Y[k1];
-                double c = (double)d->X[k2] * d->Y[k1] - (double)d->X[k1] * d->Y[k2];
-                double dist = a * d->Y[i] + b * d->X[i] + c;
-                if (dist >= 0)
-                    iIsCovered = !iIsCovered;
-            }
-        }
-
-        if (iIsCovered)
-        {
-            while(i < j)
-            {
-                bool jIsCovered = true;
-                for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
-                {
-                    if ((d->Y[k1] < d->Y[j]) != (d->Y[k2] < d->Y[j]))
-                    {
-                        double a = (double)d->X[k1] - d->X[k2];
-                        double b = (double)d->Y[k2] - d->Y[k1];
-                        double c = (double)d->X[k2] * d->Y[k1] - (double)d->X[k1] * d->Y[k2];
-                        double dist = a * d->Y[j] + b * d->X[j] + c;
-                        if (dist >= 0)
-                            jIsCovered = !jIsCovered;
-                    }
-                }
-                if (jIsCovered)
-                    j--;
-                else break;
-            }
-
-            if (j == i) break; // all points up to i included are covered by the current hull
-
-            swapElems(d->X[i], d->X[j]);
-            swapElems(d->Y[i], d->Y[j]);
-            j--;
-            i++; // if j was covered there is no need to check i in the next iteration
-        }
-        else
-            i++;
-    }
-
-    return i - hullSize;
-}
-
-#ifndef SMARTMODE
-
-static SuccessorData findFarthestPtSimple(Data *d, size_t hullSize, size_t nUncovered)
-{
-    SuccessorData farPt = { .node=0, .anchor=-1 };
-    float farPtDist = -1;
-
-    for (size_t i = hullSize; i < hullSize + nUncovered; i++)
-    {
-        size_t closestAnchor = 0;
-        float closestDist = INFINITY;
-        for (size_t j = 0, k = hullSize-1; j < hullSize; k=j++)
-        {
-            float dist0 = d->X[j] - d->X[k];
-            float dist1 = d->X[k] - d->X[i];
-            float dist2 = d->X[i] - d->X[j];
-            float yDiff0 = d->Y[j] - d->Y[k];
-            float yDiff1 = d->Y[k] - d->Y[i];
-            float yDiff2 = d->Y[i] - d->Y[j];
-            dist0 = sqrtf(dist0 * dist0 + yDiff0 * yDiff0);
-            dist1 = sqrtf(dist1 * dist1 + yDiff1 * yDiff1);
-            dist2 = sqrtf(dist2 * dist2 + yDiff2 * yDiff2);
-            float dist = dist1 + dist2 - dist0;
-            if (closestDist > dist)
-            {
-                closestDist = dist;
-                closestAnchor = k;
-            }
-        }
-        if (farPtDist < closestDist)
-        {
-            farPtDist = closestDist;
-            farPt.node = i;
-            farPt.anchor = closestAnchor;
-        }
-    }
-
-    #ifdef DEBUG
-        if (((long)farPt.node < (long)hullSize) || ((long)farPt.node > (long)hullSize + nUncovered) || ((long)farPt.anchor > (long)hullSize) || ((long)farPt.anchor < 0))
-            throwError("Invalid anchor(%ld) and node(%ld) @ hullsize=%ld, nUncovered=%ld", farPt.anchor, farPt.node, hullSize, nUncovered);
-    #endif
-
-    return farPt;
-}
-
-static void addPtToHullSimple(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered)
-{
-    swapElems(d->X[pt.node], d->X[hullSize]);
-    swapElems(d->Y[pt.node], d->Y[hullSize]);
+    // remove points from uncovered set
+    // sort first
+    for (int i = 0; (i < 4) && (ptIndices[i] != -1); i++)
+        for (int j =i+1; (j < 4) && (ptIndices[j] != -1); j++)
+            if (ptIndices[j] > ptIndices[i])
+                swapElems(ptIndices[i], ptIndices[j])
     
-    size_t anchor = pt.anchor;
-    if (hullSize == 2) //  need to check on which side the point must be added
+    // now remove the elements
+    for (int i = 0; (i < 4) && (ptIndices[i] != -1); i++)
     {
-        double a = (double)d->X[1] - d->X[0];
-        double b = (double)d->Y[0] - d->Y[1];
-        double c = (double)d->X[0] * d->Y[1] - (double)d->X[1] * d->Y[0];
-        double dist = a * d->Y[2] + b * d->X[2] + c;
-        if (dist < 0)
-            anchor = 0;
+        uncoveredPts->n--;
+        swapElems(uncoveredPts->X[ptIndices[i]], uncoveredPts->X[uncoveredPts->n]);
+        swapElems(uncoveredPts->Y[ptIndices[i]], uncoveredPts->Y[uncoveredPts->n]);
     }
-
-    float xBak = d->X[hullSize], yBak = d->Y[hullSize];
-    for (size_t i = hullSize-1; i > anchor; i--)
-    {
-        d->X[i+1] = d->X[i];
-        d->Y[i+1] = d->Y[i];
-    }
-
-    d->X[anchor+1] = xBak;
-    d->Y[anchor+1] = yBak;
 }
-#endif
 
-#ifdef SMARTMODE
-static SuccessorData findFarthestPtSmart(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors)
+static void removeCoveredPoints(Data *hull, Data *uncoveredPts, char *uncoveredCache, ProcThreadIDCombo *id)
 {
-    SuccessorData farPt = { .node=hullSize, .anchor=minDistAnchors[0] };
-    float farPtDist = minDists[0];
-
-    for (size_t i = 1; i < nUncovered; i++)
+    bool allocatedMem = false;
+    if (uncoveredCache == NULL)
     {
-        if (farPtDist < minDists[i])
+        allocatedMem = true;
+        uncoveredCache = malloc(uncoveredPts->n * sizeof(char) + MALLOC_PADDING);
+        if (uncoveredCache == NULL)
+            throwError("p[%2d] t[%3d] removeCoveredPoints: Failed to allocate memory for the uncoveredCache", id->p, id->t);
+    }
+
+    // zero cache
+    for (size_t i = 0; i < uncoveredPts->n; i++)
+        uncoveredCache[i] = 0;
+    
+    for (size_t h = 0; h < hull->n; h++)
+    {
+        __m256i shuffleMask = _mm256_setr_epi64x(0xFFFFFFFFFFFF0800, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFF0800FFFF , 0xFFFFFFFFFFFFFFFF);
+        __m256d a, b, c;
         {
-            farPtDist = minDists[i];
-            farPt.node = i + hullSize;
-            farPt.anchor = minDistAnchors[i];
+            __m128 hX0s = _mm_broadcast_ss(&hull->X[h]);
+            __m128 hX1s = _mm_broadcast_ss(&hull->X[h+1]);
+            __m128 hY0s = _mm_broadcast_ss(&hull->Y[h]);
+            __m128 hY1s = _mm_broadcast_ss(&hull->Y[h+1]);
+            __m256d hX0 = _mm256_cvtps_pd(hX0s);
+            __m256d hX1 = _mm256_cvtps_pd(hX1s);
+            __m256d hY0 = _mm256_cvtps_pd(hY0s);
+            __m256d hY1 = _mm256_cvtps_pd(hY1s);
+            a = _mm256_sub_pd(hX1, hX0);
+            b = _mm256_sub_pd(hY0, hY1);
+            c = _mm256_fmsub_pd(hX0, hY1, _mm256_mul_pd(hX1, hY0));
         }
+        size_t l = 12;
+        #ifdef USE_MANUAL_AVX_PIPELINE_OPTIMIZATION
+        for (size_t i=0, j=4, k=8; l < uncoveredPts->n; i+=16, j+=16, k+=16, l+=16) // loop using inline
+        {
+            __m256d iDist, jDist, kDist, lDist;
+            __m256d ptXi = _mm256_cvtps_pd(_mm_loadu_ps(&uncoveredPts->X[i]));
+            __m256d ptYi = _mm256_cvtps_pd(_mm_loadu_ps(&uncoveredPts->Y[i]));
+            __m256d ptXj = _mm256_cvtps_pd(_mm_loadu_ps(&uncoveredPts->X[j]));
+            __m256d ptYj = _mm256_cvtps_pd(_mm_loadu_ps(&uncoveredPts->Y[j]));
+            __m256d ptXk = _mm256_cvtps_pd(_mm_loadu_ps(&uncoveredPts->X[k]));
+            __m256d ptYk = _mm256_cvtps_pd(_mm_loadu_ps(&uncoveredPts->Y[k]));
+            __m256d ptXl = _mm256_cvtps_pd(_mm_loadu_ps(&uncoveredPts->X[l]));
+            __m256d ptYl = _mm256_cvtps_pd(_mm_loadu_ps(&uncoveredPts->Y[l]));
+        
+            __m128i u128 = _mm_loadu_si128((__m128i_u*)&uncoveredCache[i]);
+
+            iDist = _mm256_fmadd_pd(b, ptXi, c);
+            jDist = _mm256_fmadd_pd(b, ptXj, c);
+            kDist = _mm256_fmadd_pd(b, ptXk, c);
+            lDist = _mm256_fmadd_pd(b, ptXl, c);
+
+            iDist = _mm256_fmadd_pd(a, ptYi, iDist);
+            jDist = _mm256_fmadd_pd(a, ptYj, jDist);
+            kDist = _mm256_fmadd_pd(a, ptYk, kDist);
+            lDist = _mm256_fmadd_pd(a, ptYl, lDist);
+
+            __m256i iMask = _mm256_castpd_si256(_mm256_cmp_pd(iDist, _mm256_setzero_pd(), _CMP_LT_OQ));
+            __m256i jMask = _mm256_castpd_si256(_mm256_cmp_pd(jDist, _mm256_setzero_pd(), _CMP_LT_OQ));
+            __m256i kMask = _mm256_castpd_si256(_mm256_cmp_pd(kDist, _mm256_setzero_pd(), _CMP_LT_OQ));
+            __m256i lMask =_mm256_castpd_si256( _mm256_cmp_pd(lDist, _mm256_setzero_pd(), _CMP_LT_OQ));
+
+            iMask = _mm256_shuffle_epi8(iMask, shuffleMask);
+            jMask = _mm256_shuffle_epi8(jMask, shuffleMask);
+            kMask = _mm256_shuffle_epi8(kMask, shuffleMask);
+            lMask = _mm256_shuffle_epi8(lMask, shuffleMask);
+
+            __m128i mask;
+            {
+            __m128i iMaskLow = _mm256_castsi256_si128(iMask);
+            __m128i jMaskLow = _mm256_castsi256_si128(jMask);
+            __m128i kMaskLow = _mm256_castsi256_si128(kMask);
+            __m128i lMaskLow = _mm256_castsi256_si128(lMask);
+
+            __m128i iMaskHigh = _mm256_extractf128_si256(iMask, 1);
+            __m128i jMaskHigh = _mm256_extractf128_si256(jMask, 1);
+            __m128i kMaskHigh = _mm256_extractf128_si256(kMask, 1);
+            __m128i lMaskHigh = _mm256_extractf128_si256(lMask, 1);
+
+            iMaskLow = _mm_or_si128(iMaskLow, iMaskHigh);
+            jMaskLow = _mm_or_si128(jMaskLow, jMaskHigh);
+            kMaskLow = _mm_or_si128(kMaskLow, kMaskHigh);
+            lMaskLow = _mm_or_si128(lMaskLow, lMaskHigh);
+
+            jMaskLow = _mm_shuffle_epi32(jMaskLow, 0xF3);
+            kMaskLow = _mm_shuffle_epi32(kMaskLow, 0xCF);
+            lMaskLow = _mm_shuffle_epi32(lMaskLow, 0x3F);
+
+            iMaskLow = _mm_or_si128(iMaskLow, jMaskLow);
+            kMaskLow = _mm_or_si128(kMaskLow, lMaskLow);
+            mask = _mm_or_si128(iMaskLow, kMaskLow);
+            }
+
+            mask = _mm_or_si128(mask, u128);
+
+            _mm_storeu_si128((__m128i_u*)&uncoveredCache[i], mask);
+        }// */
+        #endif
+        for (size_t i=l-12; i < uncoveredPts->n; i+=4)
+        {
+            __m256d iDist;
+            __m256d ptX = _mm256_cvtps_pd(_mm_loadu_ps(&uncoveredPts->X[i]));
+            __m256d ptY = _mm256_cvtps_pd(_mm_loadu_ps(&uncoveredPts->Y[i]));
+
+            __m128i u128 = _mm_loadu_si128((__m128i_u*)&uncoveredCache[i]);
+
+            iDist = _mm256_fmadd_pd(b, ptX, c);
+            iDist = _mm256_fmadd_pd(a, ptY, iDist);
+
+            __m256i iMask = _mm256_castpd_si256(_mm256_cmp_pd(iDist, _mm256_setzero_pd(), _CMP_LT_OQ));
+
+            iMask = _mm256_shuffle_epi8(iMask, shuffleMask);
+
+            __m128i mask;
+            {
+            __m128i iMaskLow = _mm256_castsi256_si128(iMask);
+            __m128i iMaskHigh = _mm256_extractf128_si256(iMask, 1);
+            iMaskLow = _mm_or_si128(iMaskLow, iMaskHigh);
+            mask = iMaskLow;
+            }
+
+            mask = _mm_or_si128(mask, u128);
+
+            _mm_storeu_si128((__m128i_u*)&uncoveredCache[i], mask);
+        }// */
     }
 
-    #ifdef DEBUG
-        if (((long)farPt.node < (long)hullSize) || ((long)farPt.node > (long)hullSize + nUncovered) || ((long)farPt.anchor > (long)hullSize) || ((long)farPt.anchor < 0))
-            throwError("Invalid anchor(%ld) and node(%ld) @ hullsize=%ld, nUncovered=%ld", farPt.anchor, farPt.node, hullSize, nUncovered);
-    #endif
 
-    return farPt;
-}
-
-static size_t removeCoveredPointsSmart(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors)
-{
-    size_t i = hullSize;
-    size_t j = nUncovered + hullSize - 1;
+    size_t i = 0;
+    size_t j = uncoveredPts->n - 1;
     while (i <= j)
     {
-        bool iIsCovered = true;
-        for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
+        if (uncoveredCache[i] == 0)
         {
-            if ((d->Y[k1] < d->Y[i]) != (d->Y[k2] < d->Y[i]))
-            {
-                double a = (double)d->X[k1] - d->X[k2];
-                double b = (double)d->Y[k2] - d->Y[k1];
-                double c = (double)d->X[k2] * d->Y[k1] - (double)d->X[k1] * d->Y[k2];
-                double dist = a * d->Y[i] + b * d->X[i] + c;
-                if (dist >= 0)
-                    iIsCovered = !iIsCovered;
-            }
-        }
+            while ((j > i) && (uncoveredCache[j] == 0))
+                j--;
 
-        if (iIsCovered)
-        {
-            while(i < j)
-            {
-                bool jIsCovered = true;
-                for (size_t k1 = 0, k2 = hullSize-1; k1 < hullSize; k2 = k1++)
-                {
-                    if ((d->Y[k1] < d->Y[j]) != (d->Y[k2] < d->Y[j]))
-                    {
-                        double a = (double)d->X[k1] - d->X[k2];
-                        double b = (double)d->Y[k2] - d->Y[k1];
-                        double c = (double)d->X[k2] * d->Y[k1] - (double)d->X[k1] * d->Y[k2];
-                        double dist = a * d->Y[j] + b * d->X[j] + c;
-                        if (dist >= 0)
-                            jIsCovered = !jIsCovered;
-                    }
-                }
-                if (jIsCovered)
-                    j--;
-                else break;
-            }
+            if (i == j) break;
+
+            swapElems(uncoveredCache[i], uncoveredCache[j])
+            swapElems(uncoveredPts->X[i], uncoveredPts->X[j])
+            swapElems(uncoveredPts->Y[i], uncoveredPts->Y[j])
             
-            if (j == i) break; // all points up to i included are covered by the current hull
-
-            swapElems(d->X[i], d->X[j]);
-            swapElems(d->Y[i], d->Y[j]);
-            minDists[i - hullSize] = minDists[j - hullSize];
-            minDistAnchors[i - hullSize] = minDistAnchors[j - hullSize];
             j--;
-            i++;
         }
-        else
-            i++;
+        i++;
     }
 
-    return i - hullSize;
+    if (allocatedMem)
+        free(uncoveredCache);
+
+    uncoveredPts->n = i;
 }
 
-static void setupMaxDistArrays(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors)
+static void findFarthestPts(Data *hull, Data *uncoveredPts, size_t *maxDistPtIndices)
 {
-    for (size_t i = hullSize; i < hullSize + nUncovered; i++)
+    for (size_t k = 0; k < hull->n; k+=4)
     {
-        size_t i2 = i - hullSize;
-        minDists[i2] = INFINITY;
-        minDistAnchors[i2] = 0;
-        for (size_t j = 0, k = hullSize-1; j < hullSize; k=j++)
+        __m256d a, b, c;
         {
-            float dist0 = d->X[j] - d->X[k];
-            float dist1 = d->X[k] - d->X[i];
-            float dist2 = d->X[i] - d->X[j];
-            float yDiff0 = d->Y[j] - d->Y[k];
-            float yDiff1 = d->Y[k] - d->Y[i];
-            float yDiff2 = d->Y[i] - d->Y[j];
-            dist0 = sqrtf(dist0 * dist0 + yDiff0 * yDiff0);
-            dist1 = sqrtf(dist1 * dist1 + yDiff1 * yDiff1);
-            dist2 = sqrtf(dist2 * dist2 + yDiff2 * yDiff2);
-            float dist = dist1 + dist2 - dist0;
-            if (minDists[i2] > dist)
-            {
-                minDists[i2] = dist;
-                minDistAnchors[i2] = k;
-            }
+            __m256d hX0 = _mm256_cvtps_pd(_mm_loadu_ps(&hull->X[k]));
+            __m256d hX1 = _mm256_cvtps_pd(_mm_loadu_ps(&hull->X[k+1]));
+            __m256d hY0 = _mm256_cvtps_pd(_mm_loadu_ps(&hull->Y[k]));
+            __m256d hY1 = _mm256_cvtps_pd(_mm_loadu_ps(&hull->Y[k+1]));
+            a = _mm256_sub_pd(hX1, hX0);
+            b = _mm256_sub_pd(hY0, hY1);
+            c = _mm256_fmsub_pd(hX0, hY1, _mm256_mul_pd(hX1, hY0));
         }
+
+        __m256d maxDist = _mm256_setzero_pd();
+        __m256i maxDistPtsID = _mm256_set1_epi64x(-1);
+        for (size_t i = 0; i < uncoveredPts->n; i++)
+        {
+            __m256d x = _mm256_cvtps_pd(_mm_broadcast_ss(&uncoveredPts->X[i]));
+            __m256d y = _mm256_cvtps_pd(_mm_broadcast_ss(&uncoveredPts->Y[i]));
+
+            __m256i ptsID = _mm256_set1_epi64x(i);
+
+            __m256d dist = _mm256_fmadd_pd(b, x, c);
+            dist = _mm256_fmadd_pd(a, y, dist);
+
+            __m256d cmpMask = _mm256_cmp_pd(dist, maxDist, _CMP_LT_OQ);
+            maxDist = _mm256_min_pd(maxDist, dist);
+            maxDistPtsID = _mm256_blendv_epi8(maxDistPtsID, ptsID, _mm256_castpd_si256(cmpMask));
+        }
+        
+        _mm256_storeu_si256((__m256i_u*)&maxDistPtIndices[k], maxDistPtsID);
+    }
+}
+
+static void addPtsToHull(Data *hull, Data *uncoveredPts, size_t **maxDistPtIndicesPtr, size_t **offsetCounterPtr, size_t *allocatedElemsCount, ProcThreadIDCombo *id)
+{
+    size_t *offsetCounter = *offsetCounterPtr;
+    size_t *maxDistPtIndices = *maxDistPtIndicesPtr;
+
+    // compute offset to apply in hull in order to minimize the number of swaps
+    offsetCounter[0] = 0; // first element always stays there
+    for (size_t i = 1; i <= hull->n; i++)
+    {
+        if (maxDistPtIndices[i-1] != -1)
+            offsetCounter[i] = offsetCounter[i-1] + 1;
+        else
+            offsetCounter[i] = offsetCounter[i-1];
+    }
+    
+    // realloc memory if necessary
+    bool reallocMemory = false;
+    if (hull->n + offsetCounter[hull->n] > *allocatedElemsCount)
+    {
+        reallocMemory = true;
+        *allocatedElemsCount *= 4;
+        hull->X = realloc(hull->X, *allocatedElemsCount * sizeof(float) + MALLOC_PADDING);
+        if (hull->X == NULL)
+            throwError("p[%2d] t[%3d] addPtToHull: Failed to reallocate hull.X. uncoveredPts=%ld", id->p, id->t, uncoveredPts->n);
+        hull->Y = realloc(hull->Y, *allocatedElemsCount * sizeof(float) + MALLOC_PADDING);
+        if (hull->Y == NULL)
+            throwError("p[%2d] t[%3d] addPtToHull: Failed to reallocate hull.Y. uncoveredPts=%ld", id->p, id->t, uncoveredPts->n);
+    }
+
+    // make space in hull.X and hull.Y to fit new points
+    for (size_t i = hull->n; offsetCounter[i] != 0; i--)
+    {
+        size_t iOffset = i + offsetCounter[i];
+        hull->X[iOffset] = hull->X[i];
+        hull->Y[iOffset] = hull->Y[i];
         #ifdef DEBUG
-            if (minDists[i2] == INFINITY)
-                throwError("Could not find the closest edge for %d uncovered node", i2);
+            hull->X[i] = 0;
+            hull->Y[i] = 0;
         #endif
     }
-}
+    // now hull.X and hull.Y have exact spacing to fit the whole of new points to add without needing to be moved again
 
-static void addPtToHullSmart(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors)
-{
-    // move the node closer to the hull
-    swapElems(d->X[hullSize], d->X[pt.node]);
-    swapElems(d->Y[hullSize], d->Y[pt.node]);
-    minDists[pt.node-hullSize] = minDists[0];
-    minDistAnchors[pt.node-hullSize] = minDistAnchors[0];
-
-    size_t anchor = pt.anchor;
-    if (hullSize == 2) //  need to check on which side the point must be added
+    // put new points in the empty spaces left by the above procedure
+    for (size_t i = 0; i < hull->n; i++)
     {
-        double a = (double)d->X[1] - d->X[0];
-        double b = (double)d->Y[0] - d->Y[1];
-        double c = (double)d->X[0] * d->Y[1] - (double)d->X[1] * d->Y[0];
-        double dist = a * d->Y[2] + b * d->X[2] + c;
-        if (dist < 0)
-            anchor = 0;
+        if (maxDistPtIndices[i] != -1)
+        {
+            size_t iOffset = i + offsetCounter[i] + 1;
+            hull->X[iOffset] = uncoveredPts->X[maxDistPtIndices[i]];
+            hull->Y[iOffset] = uncoveredPts->Y[maxDistPtIndices[i]];
+        }
     }
 
-    float xBak = d->X[hullSize], yBak = d->Y[hullSize];
-    for (size_t i = hullSize-1; i > anchor; i--)
+    // sort maxDistPtIndices to safely remove points added to the hull from the uncovered set use selection sort because i'm lazy and don't want to write quicksort
+    // first move all -1 (if any) to the end of the array to avoid worthless moves(especially useful in reducing complexity towards the last iterations)
+    size_t i = 0;
+    size_t j = hull->n - 1;
+    while (i <= j)
     {
-        d->X[i+1] = d->X[i];
-        d->Y[i+1] = d->Y[i];
+        if (maxDistPtIndices[i] == -1)
+        {
+            while ((j > i) && (maxDistPtIndices[j] == -1))
+                j--;
+            
+            if (j == i) break;
+
+            swapElems(maxDistPtIndices[i], maxDistPtIndices[j])
+            j--;
+        }
+        i++;
     }
-
-    d->X[anchor+1] = xBak;
-    d->Y[anchor+1] = yBak;
-}
-
-static void adaptMinArrays(Data *d, SuccessorData pt, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors)
-{
-    // recompute min distance wherever it is necessary
-    size_t j0 = pt.anchor, j1 = (pt.anchor+1) % hullSize, j2 = (pt.anchor+2) % hullSize;
-    for (size_t i = 0; i < nUncovered; i++)
+    // selection sort here
+    for (size_t k = 0; k < i; k++)
     {
-        if (minDistAnchors[i] == pt.anchor)
-        {
-            size_t k = i + hullSize;
-            minDists[i] = INFINITY;
-            {
-                float dist0 = d->X[j0] - d->X[j1];
-                float dist1 = d->X[j1] - d->X[k];
-                float dist2 = d->X[k] - d->X[j0];
-                float yDiff0 = d->Y[j0] - d->Y[j1];
-                float yDiff1 = d->Y[j1] - d->Y[k];
-                float yDiff2 = d->Y[k] - d->Y[j0];
-                dist0 = sqrtf(dist0 * dist0 + yDiff0 * yDiff0);
-                dist1 = sqrtf(dist1 * dist1 + yDiff1 * yDiff1);
-                dist2 = sqrtf(dist2 * dist2 + yDiff2 * yDiff2);
-                minDists[i] = dist1 + dist2 - dist0;
-            }
-            {
-                float dist0 = d->X[j1] - d->X[j2];
-                float dist1 = d->X[j2] - d->X[k];
-                float dist2 = d->X[k] - d->X[j1];
-                float yDiff0 = d->Y[j1] - d->Y[j2];
-                float yDiff1 = d->Y[j2] - d->Y[k];
-                float yDiff2 = d->Y[k] - d->Y[j1];
-                dist0 = sqrtf(dist0 * dist0 + yDiff0 * yDiff0);
-                dist1 = sqrtf(dist1 * dist1 + yDiff1 * yDiff1);
-                dist2 = sqrtf(dist2 * dist2 + yDiff2 * yDiff2);
-                float dist = dist1 + dist2 - dist0;
-                if (dist < minDists[i])
-                {
-                    minDists[i] = dist;
-                    minDistAnchors[i] = j1;
-                }
-            }
-        }
-        else if (minDistAnchors[i] > pt.anchor)
-            minDistAnchors[i]++;
-    }
-}
-
-#ifdef DEBUG
-static bool integrityCheck(Data *d, size_t hullSize, size_t nUncovered, float *minDists, size_t *minDistAnchors, ProcThreadIDCombo *id)
-{
-    bool quit = false;
-    for (size_t i = hullSize; i < hullSize + nUncovered; i++)
-    {
-        size_t closestAnchor = 0;
-        float closestDist = INFINITY;
-        for (size_t j = 0, k = hullSize-1; j < hullSize; k=j++)
-        {
-            float dist0 = d->X[j] - d->X[k];
-            float dist1 = d->X[k] - d->X[i];
-            float dist2 = d->X[i] - d->X[j];
-            float yDiff0 = d->Y[j] - d->Y[k];
-            float yDiff1 = d->Y[k] - d->Y[i];
-            float yDiff2 = d->Y[i] - d->Y[j];
-            dist0 = sqrtf(dist0 * dist0 + yDiff0 * yDiff0);
-            dist1 = sqrtf(dist1 * dist1 + yDiff1 * yDiff1);
-            dist2 = sqrtf(dist2 * dist2 + yDiff2 * yDiff2);
-            float dist = dist1 + dist2 - dist0;
-            if (closestDist > dist)
-            {
-                closestDist = dist;
-                closestAnchor = k;
-            }
-        }
-        
-        size_t i2 = i - hullSize;
-        if ((minDists[i2] != closestDist) && (minDistAnchors[i2] != closestAnchor))
-        {
-            quit = true;
-            LOG(LOG_LVL_ERROR, "p[%2d] t[%3d] integrityCheck: @[%ld] minDists=%.3e instead of %.3e,\t minDistAnchors=%ld instead of %ld", id->p, id->t, i2, minDists[i2], closestDist, minDistAnchors[i2], closestAnchor);
-        }
-        else if (minDists[i2] != closestDist)
-        {
-            quit = true;
-            LOG(LOG_LVL_ERROR, "p[%2d] t[%3d] integrityCheck: @[%ld] minDists=%.3e instead of %.3e", id->p, id->t, i2, minDists[i2], closestDist);
-        }
-        else if (minDistAnchors[i2] != closestAnchor)
-        {
-            quit = true;
-            LOG(LOG_LVL_ERROR, "p[%2d] t[%3d] integrityCheck: @[%ld] minDistAnchors=%ld instead of %ld", id->p, id->t, i2, minDistAnchors[i2], closestAnchor);
-        }
+        size_t maxk = k;
+        for (size_t l = k+1; l < i; l++)
+            if (maxDistPtIndices[maxk] < maxDistPtIndices[l])
+                maxk = l;
+        if (k != maxk)
+            swapElems(maxDistPtIndices[maxk], maxDistPtIndices[k]);
     }
     
-    return quit;
+    // remove element from hull
+    for (size_t k = 0; k < i; k++)
+    {
+        #ifdef DEBUG
+            if (maxDistPtIndices[k] == -1)
+                throwError("p[%2d] t[%3d] addPtToHull: Unable to remove all -1 from maxDistPtIndices before the sorting. uncoveredPts=%ld, i=%ld, j=%ld", id->p, id->t, uncoveredPts->n, i, j);
+        #endif
+        uncoveredPts->n--;
+        swapElems(uncoveredPts->X[maxDistPtIndices[k]], uncoveredPts->X[uncoveredPts->n]);
+        swapElems(uncoveredPts->Y[maxDistPtIndices[k]], uncoveredPts->Y[uncoveredPts->n]);
+    }
+
+    size_t addedElemsCount = offsetCounter[hull->n];
+    if (reallocMemory)
+    {
+        free(offsetCounter);
+        offsetCounter = malloc(*allocatedElemsCount * 2 * sizeof(size_t) + MALLOC_PADDING*2);
+        if (offsetCounter == NULL)
+            throwError("p[%2d] t[%3d] addPtToHull: Failed to reallocate memory. uncoveredPts=%ld", id->p, id->t, uncoveredPts->n);
+        *maxDistPtIndicesPtr = &offsetCounter[*allocatedElemsCount];
+        *offsetCounterPtr = offsetCounter;
+    }
+
+    hull->n += addedElemsCount;
 }
-#endif
-#endif
+
 
 #ifdef DEBUG
-static bool hullConvexityCheck(Data *h, size_t hullSize, ProcThreadIDCombo *id)
+int hullConvexityCheck(Data *hull, ProcThreadIDCombo *id)
 {
-    bool retval = false;
-    for (size_t i = 0; i < hullSize; i++)
+    int retval = 0;
+    for (size_t i = 0; i < hull->n; i++)
     {
         size_t ip1 = i+1;
-        if (ip1 == hullSize)
-            ip1=0;
+        if (ip1 == hull->n) ip1 = 0;
         
-        double a = (double)h->X[ip1] - h->X[i];
-        double b = (double)h->Y[i] - h->Y[ip1];
-        double c = (double)h->X[i] * h->Y[ip1] - (double)h->X[ip1] * h->Y[i];
+        double a = (double)hull->X[ip1] - hull->X[i];
+        double b = (double)hull->Y[i] - hull->Y[ip1];
+        double c = (double)hull->X[i] * hull->Y[ip1] - (double)hull->X[ip1] * hull->Y[i];
 
-        for (size_t j = 0; j < hullSize; j++)
+        for (size_t j = 0; j < hull->n; j++)
         {
-            if ((j == i) || (j == ip1))
-                continue;
-            double dist = a * h->Y[j] + b * h->X[j] + c;
-            if (dist < 0)
+            if ((j == i) || (j == ip1)) continue;
+
+            double dist = a * hull->Y[j] + b * hull->X[j] + c;
+            if (dist <= 0)
             {
-                LOG(LOG_LVL_ERROR, "p[%2d] t[%3d] hullConvexityCheck: Hull is not convex. pt[%ld] is not to the left of line between pt[%ld] and pt[%ld]", id->p, id->t, j, i, ip1);
-                retval = true;
+                LOG(LOG_LVL_ERROR, "p[%2d] t[%3d] quikchull-hullConvexityCheck: Hull is not convex. pt[%ld] is not to the left of line between pt[%ld] and pt[%ld]", id->p, id->t, j, i, ip1);
+                retval = 1;
             }
         }
     }
     return retval;
 }
+
+int finalCoverageCheck(Data *hull, Data *pts, ProcThreadIDCombo *id)
+{
+    Data p = *pts;
+
+    removeCoveredPoints(hull, &p, NULL, id);
+
+    for (size_t i = 0; i < p.n; i++)
+    {
+        for (size_t j = 0; j < hull->n; j++)
+        {
+            if ((p.X[i] == hull->X[j]) && (p.Y[i] == hull->Y[j])) // point is part of the hull
+            {
+                p.n--;
+                swapElems(p.X[i], p.X[p.n])
+                swapElems(p.Y[i], p.Y[p.n])
+                i--;
+                break;
+            }
+        }
+    }
+    
+    for (size_t i = 0; i < p.n; i++)
+        LOG(LOG_LVL_ERROR, "p[%2d] t[%3d] quikchull-finalCoverageCheck: Hull does not cover point %ld", id->p, id->t, i);
+    
+    if (p.n == 0) return 0;
+    else return 1;
+}
+
 #endif
