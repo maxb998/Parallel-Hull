@@ -6,7 +6,11 @@
     #include <time.h>
     #include <stdio.h>
     #include <unistd.h> // needed to get the _POSIX_MONOTONIC_CLOCK and measure time
+#else
+    #include <mpi.h>
 #endif
+
+
 
 #define USE_MANUAL_AVX_PIPELINE_OPTIMIZATION // without this takes removeCoveredPoints takes more than triple the time
 
@@ -21,16 +25,18 @@ static void addPtsToHull(Data *hull, Data *uncoveredPts, size_t **maxDistPtIndic
 
 Data quickhull (Data *d, ProcThreadIDCombo *id)
 {
-    double startTime, iterTime, previousIterTime;
     int iterCount = 0;
 
     #ifdef NON_MPI_MODE
         struct timespec timeStruct;
         clock_gettime(_POSIX_MONOTONIC_CLOCK, &timeStruct);
-        startTime = cvtTimespec2Double(timeStruct);
-        iterTime = startTime;
-        previousIterTime = 0;
+        double startTime = cvtTimespec2Double(timeStruct);
+        double iterTime = startTime;
+        double previousIterTime = 0;
     #else
+        double startTime = MPI_Wtime();
+        double iterTime = startTime;
+        double previousIterTime = 0;
     #endif
 
     Data hull, uncoveredPts;
@@ -68,6 +74,8 @@ Data quickhull (Data *d, ProcThreadIDCombo *id)
             previousIterTime = iterTime;
             clock_gettime(_POSIX_MONOTONIC_CLOCK, &timeStruct);
             iterTime = cvtTimespec2Double(timeStruct);
+        #else
+            iterTime = MPI_Wtime();
         #endif
 
         LOG(LOG_LVL_TRACE, "p[%2d] t[%3d] quickhull: Iteration %5d lasted %.3es, %.3es from the begining. nUncovered=%.3e, hullSize=%ld", id->p, id->t, iterCount, iterTime-previousIterTime, iterTime-startTime, (float)uncoveredPts.n, hull.n);

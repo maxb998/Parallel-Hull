@@ -12,9 +12,9 @@
             "request": "launch",
             "program": "${workspaceFolder}/bin/debug/main",
             "args": [
-                "--file", "data/round_1x10e7_2",
-                "--threads", "1",
-                "--loglvl", "trace"
+                "--file", "data/round_1x10e3",
+                "--threads", "8",
+                "--loglvl", "info"
             ],
             "cwd": "${workspaceFolder}"
        },
@@ -26,24 +26,10 @@
             "program": "${workspaceFolder}/bin/exec/main",
             "args": [
                 "--file", "data/round_1x10e8",
-                "--threads", "1",
+                "--threads", "8",
                 "--loglvl", "trace"
             ],
             "cwd": "${workspaceFolder}"
-        },
-        {
-            "type":"cppdbg",
-            "name": "mpirun",
-            "preLaunchTask": "Build Exec",
-            "request": "launch",
-            "program": "mpirun",
-            "args": [
-                "mpirun", "-np", "4", "bin/exec/main",
-                "--file", "data/",
-                "--threads", "1",
-                "--loglvl", "info"
-            ],
-            "cwd": "${workspaceFolder}"
-        },
+        }
     ]
 }

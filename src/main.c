@@ -74,7 +74,7 @@ int main (int argc, char *argv[])
 
 int main (int argc, char *argv[])
 {
-    double startTime, initTime, fileReadTime, quickhullTime;
+    double startTime, initTime, fileReadTime, localHullTime, mergeTime;
     int MPIErrCode;
     startTime = MPI_Wtime();
 
@@ -96,45 +96,60 @@ int main (int argc, char *argv[])
     if (MPIErrCode !=MPI_SUCCESS)
         throwError("MPI_Comm_rank failed with code %d", MPIErrCode);
 
-    if (rank == 0)
-    {
-        initTime = MPI_Wtime();
-        LOG(LOG_LVL_NOTICE, "MPI run with:\n\tnProcs = %d\n\tnThreads = %d\n", p.nProcs, p.nThreads);
-        LOG(LOG_LVL_NOTICE, "MPI init took %lfs", initTime - startTime);
-    }
+    initTime = MPI_Wtime();
+    LOG(LOG_LVL_NOTICE, "p[%d] MPI run with: nProcs = %2d \tnThreads = %3d\n", rank, p.nProcs, p.nThreads);
+    LOG(LOG_LVL_NOTICE, "p[%d] MPI init took %lfs", rank, initTime - startTime);
 
-    size_t n = readFile(&d, &p, rank);
-    
-    //MPI_Barrier(MPI_COMM_WORLD);
+    readFilePart(&d, &p, rank);
 
     if (rank == 0)
-    {
-        fileReadTime = MPI_Wtime();
         LOG(LOG_LVL_DEBUG, "Check endianity of raw file content: X[0]=%f  X[1]=%f", d.X[0], d.X[1]);
-        LOG(LOG_LVL_NOTICE, "File read in %lfs", fileReadTime - startTime);
-    }
 
-    Data hull = parallhullThreaded(&d, -1, p.nThreads);
+    fileReadTime = MPI_Wtime();
+    LOG(LOG_LVL_NOTICE, "p[%d] File read in %lfs", rank, fileReadTime - startTime);
 
-    if (rank == 0)
-        LOG(LOG_LVL_NOTICE, "Local quickhull finished in %lfs", quickhullTime - fileReadTime);
+    Data hull = parallhullThreaded(&d, -1, rank, p.nThreads);
+
+    localHullTime = MPI_Wtime();
+    LOG(LOG_LVL_NOTICE, "p[%d] Local quickhull finished in %lfs", rank, localHullTime - fileReadTime);
     
-    int nParts = p.nProcs;
-    while (nParts > 1)
-    {
-        
-    }
-    
-    
+    mpiHullMerge(&hull, rank, p.nProcs);
+
+    mergeTime = MPI_Wtime();
+    LOG(LOG_LVL_NOTICE, "p[%d] Hull merge finished in %lfs", rank, mergeTime - localHullTime);
+
+    #ifdef DEBUG
+        if (rank == 0)
+        {
+            Data fullData;
+            readFile(&fullData, &p);
+
+            ProcThreadIDCombo id = { .p=0, .t=0 };
+
+            if (finalCoverageCheck(&hull, &fullData, &id))
+                throwError("final coverage check failed");
+            LOG(LOG_LVL_NOTICE, "Final checks ok!");
+
+            free(fullData.X);
+        }
+    #endif
 
     #if defined(GUI_OUTPUT)
         if ((rank == 0) && (d.n < 200000))
-            plotData(&d, &hull, 0, GNUPLOT_RES, "Complete Hull");
+            plotData(&d, &hull, 0, "Complete Hull");
     #endif
 
-    free(d.X);
-    d.X = NULL; d.Y = NULL;
+    if (rank == 0)
+    {
+        LOG(LOG_LVL_NOTICE, "Total time taken: %lfs", mergeTime - startTime);
+        LOG(LOG_LVL_NOTICE, "Total time taken(without init): %lfs", mergeTime - initTime);
+    }
 
+    free(d.X);
+    free(hull.X);
+    free(hull.Y);
+
+    MPI_Finalize();
     return EXIT_SUCCESS;
 }
 

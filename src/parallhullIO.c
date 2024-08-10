@@ -5,6 +5,10 @@
 #include <string.h>
 #include <stdarg.h>
 #include <ctype.h>
+#include <math.h>
+#ifndef NON_MPI_MODE
+    #include <mpi.h>
+#endif
 
 #ifdef GUI_OUTPUT
 const char * logLevelString [] = {
@@ -54,24 +58,6 @@ void LOG (enum LogLevel lvl, char * line, ...)
         printf("\n");
 }
 
-void inlineLOG (enum LogLevel lvl, char * line, ...)
-{
-    // check log level
-    if (lvl > LOG_LEVEL) return;
-
-    // print log level
-    printf("\r%s ", logLevelString[lvl]);
-    fflush(stdout);
-
-    // print passed message and values
-    va_list params;
-    va_start(params, line);
-    vprintf(line, params);
-    va_end(params);
-    
-    fflush(stdout);
-}
-
 void throwError (char * line, ...)
 {
     printf("%s ", logLevelString[0]);
@@ -83,10 +69,13 @@ void throwError (char * line, ...)
 
     printf("\n");
 
-    exit(EXIT_FAILURE);
+    #ifdef NON_MPI_MODE
+        exit(EXIT_FAILURE);
+    #else
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    #endif
 }
 
-#ifdef NON_MPI_MODE
 void readFile(Data *d, Params *p)
 {
     FILE *fileptr = fopen(p->inputFile, "rb");
@@ -106,8 +95,8 @@ void readFile(Data *d, Params *p)
 
     fclose(fileptr);
 }
-#else
-size_t readFile(Data *d, Params *p, int rank)
+
+void readFilePart(Data *d, Params *p, int rank)
 {
     FILE *fileptr = fopen(p->inputFile, "rb");
     if (fileptr == NULL)
@@ -129,21 +118,18 @@ size_t readFile(Data *d, Params *p, int rank)
 
     // read X
     size_t offset = stdReducedSize * rank * sizeof(float);
-    if (fseek(fileptr, offset, SEEK_SET));
+    if (fseek(fileptr, offset, SEEK_SET))
         throwError("readFile: fseek SET X Failed");
     fread(d->X, d->n * sizeof(float), 1, fileptr);
 
     // read Y
     offset += n * sizeof(float);
-    if (fseek(fileptr, offset, SEEK_SET));
+    if (fseek(fileptr, offset, SEEK_SET))
         throwError("readFile: fseek SET Y Failed");
     fread(d->Y, d->n * sizeof(float), 1, fileptr);
 
     fclose(fileptr);
-
-    return n;
 }
-#endif
 
 void plotData(Data *points, Data *hull, int nUncovered, const char * title)
 {

@@ -7,7 +7,7 @@
     #include <time.h>
     #include <unistd.h> // needed to get the _POSIX_MONOTONIC_CLOCK and measure time
 #else
-    //#include <mpi.h>
+    #include <mpi.h>
 #endif
 #if defined(PARALLHULL_STEP_DEBUG) || defined(PARALLHULL_MERGE_OUTPUT_PLOT)
     #include <stdio.h>
@@ -40,12 +40,12 @@ static inline NextPtOp findNextMergePoint(Data *mergedH, Data *mainH, Data *altH
 
 Data parallhullThreaded(Data *d, size_t reducedProblemUB, int procID, int nThreads)
 {
-    double startTime;
     #ifdef NON_MPI_MODE
         struct timespec timeStruct;
         clock_gettime(_POSIX_MONOTONIC_CLOCK, &timeStruct);
-        startTime = cvtTimespec2Double(timeStruct);
+        double startTime = cvtTimespec2Double(timeStruct);
     #else
+        double startTime = MPI_Wtime();
     #endif
 
     int finishRecord[MAX_THREADS];
@@ -76,23 +76,24 @@ Data parallhullThreaded(Data *d, size_t reducedProblemUB, int procID, int nThrea
         pthread_create(&threads[i], NULL, parallhullThread, (void*)&ds[i]);
     }
 
-    for (int i = nThreads - 1; i > 0; i--)
+    pthread_join(threads[0], NULL); // join outside so that final hull memory alloc is not free
+    for (int i = 1; i < nThreads; i++)
     {
         pthread_join(threads[i], NULL);
         free(hulls[i].X);
         free(hulls[i].Y);
     }
-    pthread_join(threads[0], NULL); // join outside so that final hull memory alloc is not free
 
     #ifdef DEBUG
     #endif
     
-    double finishTime;
     #ifdef NON_MPI_MODE
         clock_gettime(_POSIX_MONOTONIC_CLOCK, &timeStruct);
-        finishTime = cvtTimespec2Double(timeStruct);
+        double finishTime = cvtTimespec2Double(timeStruct);
         LOG(LOG_LVL_NOTICE, "Exec time of ParallHull using threads is %lfs", finishTime - startTime);
     #else
+        double finishTime = MPI_Wtime();
+        LOG(LOG_LVL_NOTICE, "p[%2d] parallhull: finished hull computation in %lfs", procID, finishTime - startTime);
     #endif
 
     return hulls[0];
@@ -189,15 +190,16 @@ static void *parallhullThread(void *arg)
     thData->finishRecord[thID] = 1;
 
     // P2: thread merge their results with each other in a ordered manner
-    int i = 1, thID2merge = thID + 1;
-    while ((thID % i == 0) && (thID2merge < thData->nThreads))
+    int s = 0;
+    int thID2merge = thID + 1;
+    while ((((thID>>s) & 1) == 0) && (thID2merge < thData->nThreads))
     {
-        while (thData->finishRecord[thID2merge] < i) // spinlock (the assumption here is that threads should take more or less the same amount of time to merge, and this kinds of keeps the cpu "warm")
+        while (thData->finishRecord[thID2merge] < s+1) // spinlock (the assumption here is that threads should take more or less the same amount of time to merge, and this kinds of keeps the cpu "warm")
             __builtin_ia32_pause();
         
         Data h = mergeHulls(&thData->hulls[thID], &thData->hulls[thID2merge], &thData->id);
 
-        LOG(LOG_LVL_INFO, "p[%2d] t[%3d] parallhullThread: Merging hull with hull in thread %d", thData->id.p, thID, thID2merge);
+        LOG(LOG_LVL_INFO, "p[%2d] t[%3d] parallhullThread: Merging hull with hull in thread %d. s=%d", thData->id.p, thID, thID2merge, s);
 
         #ifdef DEBUG
             if (hullConvexityCheck(&h, &thData->id))
@@ -218,17 +220,101 @@ static void *parallhullThread(void *arg)
         
         thData->hulls[thID] = h;
 
-        i = i << 1;
-        thID2merge = thID + i;
+        s++;
+        thID2merge = thID + (1<<s);
 
-        // set thread finished computation
-        thData->finishRecord[thID] = i;
+        thData->finishRecord[thID] = s+1;
     }
 
     thData->finishRecord[thID] = 0x7FFFFFFF; // cannot stall spinlock anymore
     
     return NULL;
 }
+
+#ifndef NON_MPI_MODE
+void mpiHullMerge(Data *h1, int rank, int nProcs)
+{
+    int s = 0;
+    int rank2receive = rank + 1;
+    int MPIErrCode;
+
+    int modRank = rank;
+    while ((((modRank>>s) & 1) == 0) && (rank2receive < nProcs))
+    {
+        Data h2;
+        { // receive
+            LOG(LOG_LVL_TRACE, "p[%2d] mpiHullMerge: receiving data from rank %d", rank, rank2receive);
+
+            MPIErrCode = MPI_Recv(&h2.n, 1, MPI_UNSIGNED_LONG, rank2receive, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            if (MPIErrCode)
+                throwError("p[%2d] mpiHullMerge: Got error %d on receiving the number of elements of partial hull from p[%d]", rank, MPIErrCode, rank2receive);
+
+            h2.X = malloc((h2.n + 1) * sizeof(float) + MALLOC_PADDING);
+            h2.Y = malloc((h2.n + 1) * sizeof(float) + MALLOC_PADDING);
+            if ((h2.X == NULL) || (h2.Y == NULL))
+                throwError("p[%2d] mpiHullMerge: Failed to allocate memory for the hull to be received");
+
+            MPIErrCode = MPI_Recv(h2.X, h2.n, MPI_FLOAT, rank2receive, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            if (MPIErrCode)
+                throwError("p[%2d] mpiHullMerge: Got error %d on receiving the partial hull Xs from p[%d]", rank, MPIErrCode, rank2receive);
+            h2.X[h2.n] = h2.X[0];
+            h2.X[h2.n+1] = h2.X[1];
+
+            MPIErrCode = MPI_Recv(h2.Y, h2.n, MPI_FLOAT, rank2receive, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            if (MPIErrCode)
+                throwError("p[%2d] mpiHullMerge: Got error %d on receiving the partial hull Xs from p[%d]", rank, MPIErrCode, rank2receive);
+            h2.Y[h2.n] = h2.Y[0];
+            h2.Y[h2.n+1] = h2.Y[1];
+        }
+        
+        ProcThreadIDCombo id = {.p=rank, .t=0};
+        Data h0 = mergeHulls(h1, &h2, &id);
+
+        LOG(LOG_LVL_INFO, "p[%2d] mpiHullMerge: Merging hull with hull in proc %d", rank, rank2receive);
+
+        #ifdef DEBUG
+            if (hullConvexityCheck(&h0, &id))
+            {
+                plotHullMergeStep(h1, &h2, &h0, 0, 0, "Plot of the error", false);
+                throwError("p[%2d] mpiHullMerge: Merged hull is not convex", rank);
+            }
+            if (mergeHullCoverageCheck(&h0, h1, &h2, &id))
+            {
+                plotHullMergeStep(h1, &h2, &h0, 0, 0, "Plot of the error", false);
+                throwError("p[%2d] mpiHullMerge: Merged Hull does not cover all the points in the hull", rank);
+            }
+        #endif
+
+        // each thread manages to free its own memory
+        free(h1->X);
+        free(h1->Y);
+        free(h2.X);
+        free(h2.Y);
+
+        *h1 = h0;
+
+        s++;
+        rank2receive = rank + (1<<s);
+    }
+    if (rank != 0) // send
+    {
+        int rank2send = rank & (0xFFFFFFFE<<s);
+        LOG(LOG_LVL_TRACE, "p[%2d] mpiHullMerge: sending data to rank %d", rank, rank2send);
+
+        MPIErrCode = MPI_Send(&h1->n, 1, MPI_UNSIGNED_LONG, rank2send, 0, MPI_COMM_WORLD);
+        if (MPIErrCode)
+            throwError("p[%2d] mpiHullMerge: Got error %d on sending the number of elements of partial hull from p[%d]", rank, MPIErrCode, rank2send);
+
+        MPIErrCode = MPI_Send(h1->X, h1->n, MPI_FLOAT, rank2send, 1, MPI_COMM_WORLD);
+        if (MPIErrCode)
+            throwError("p[%2d] mpiHullMerge: Got error %d on sending the partial hull Xs from p[%d]", rank, MPIErrCode, rank2send);
+
+        MPIErrCode = MPI_Send(h1->Y, h1->n, MPI_FLOAT, rank2send, 2, MPI_COMM_WORLD);
+        if (MPIErrCode)
+            throwError("p[%2d] mpiHullMerge: Got error %d on sending the partial hull Xs from p[%d]", rank, MPIErrCode, rank2send);
+    }
+}
+#endif
 
 static Data mergeHulls(Data *h1, Data *h2, ProcThreadIDCombo *id)
 {
@@ -272,7 +358,6 @@ static Data mergeHulls(Data *h1, Data *h2, ProcThreadIDCombo *id)
     }
     }
 
-    //NextPtOp npo = NPO_CONTINUE;
     while ((mainHIndex < mainH->n) || ((mainHIndex <= mainH->n) && ((h0.X[h0.n-1] != h0.X[0]) || (h0.Y[h0.n-1] != h0.Y[0]))))
     {
         #ifdef DEBUG
@@ -281,11 +366,6 @@ static Data mergeHulls(Data *h1, Data *h2, ProcThreadIDCombo *id)
                 plotHullMergeStep(mainH, altH, &h0, mainHIndex, altHindex, "Plot of the error", false);
                 throwError("p[%2d] t[%3d] mergeHull: Cannot add points from an hull that has already been read completely. mainHIndex=%ld, mainH.n=%ld, altHIndex=%ld, altH.n=%ld, h0.n=%ld", id->p, id->t, mainHIndex, mainH->n, altHindex, altH->n, h0.n);
             }
-            // if (hullConvexityCheck(&h0, id))
-            // {
-            //     plotHullMergeStep(mainH, altH, &h0, mainHIndex, altHindex, "Plot of the error", false);
-            //     throwError("p[%2d] t[%3d] mergeHull: Merged hull is not convex. mainHIndex=%ld, mainH.n=%ld, altHIndex=%ld, altH.n=%ld, h0.n=%ld", id->p, id->t, mainHIndex, mainH->n, altHindex, altH->n, h0.n);
-            // }
         #endif
 
         #ifdef PARALLHULL_STEP_DEBUG
