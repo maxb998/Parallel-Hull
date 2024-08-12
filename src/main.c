@@ -143,6 +143,7 @@ int main (int argc, char *argv[])
     {
         LOG(LOG_LVL_NOTICE, "Total time taken: %lfs", mergeTime - startTime);
         LOG(LOG_LVL_NOTICE, "Total time taken(without init): %lfs", mergeTime - initTime);
+        LOG(LOG_LVL_NOTICE, "Computation time taken: %lfs", mergeTime - fileReadTime);
     }
 
     free(d.X);
