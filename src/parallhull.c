@@ -243,7 +243,7 @@ void mpiHullMerge(Data *h1, int rank, int nProcs)
     {
         Data h2;
         { // receive
-            LOG(LOG_LVL_TRACE, "p[%2d] mpiHullMerge: receiving data from rank %d", rank, rank2receive);
+            LOG(LOG_LVL_DEBUG, "p[%2d] mpiHullMerge: receiving data from rank %d", rank, rank2receive);
 
             MPIErrCode = MPI_Recv(&h2.n, 1, MPI_UNSIGNED_LONG, rank2receive, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             if (MPIErrCode)
@@ -299,7 +299,12 @@ void mpiHullMerge(Data *h1, int rank, int nProcs)
     if (rank != 0) // send
     {
         int rank2send = rank & (0xFFFFFFFE<<s);
-        LOG(LOG_LVL_TRACE, "p[%2d] mpiHullMerge: sending data to rank %d", rank, rank2send);
+        while (rank2send == rank)
+        {
+            s++;
+            rank2send = rank & (0xFFFFFFFE<<s);
+        }
+        LOG(LOG_LVL_DEBUG, "p[%2d] mpiHullMerge: sending data to rank %d with s=%d", rank, rank2send, s);
 
         MPIErrCode = MPI_Send(&h1->n, 1, MPI_UNSIGNED_LONG, rank2send, 0, MPI_COMM_WORLD);
         if (MPIErrCode)
