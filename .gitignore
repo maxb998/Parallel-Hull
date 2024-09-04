@@ -5,4 +5,10 @@ obj/exec/*.o
 data/*
 !data/.placeholder
 .vscode/settings.json
+report/*.fls
+report/*.toc
+report/*.aux
+report/*.gz
+report/*.fdb_latexmk
+report/*.log
 
